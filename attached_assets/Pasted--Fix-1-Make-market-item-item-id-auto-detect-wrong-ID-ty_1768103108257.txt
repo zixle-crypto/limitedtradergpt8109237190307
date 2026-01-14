@@ -1,0 +1,117 @@
+✅ Fix 1: Make /market/item/{item_id} auto-detect “wrong ID type”
+
+Add this at the TOP of market_item:
+
+@app.get("/market/item/{item_id}")
+def market_item(item_id: int):
+    # UAIDs / userAssetIds are usually huge compared to catalog assetIds
+    if item_id >= 1_000_000_000:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "LIKELY_WRONG_ID_TYPE",
+                "message": "This looks like a UAID/userAssetId, not a catalog assetId. Use assetId (catalog item id).",
+                "details": {"received": item_id}
+            },
+        )
+
+    info = _extract_item_info_from_itemdetails(item_id)
+    return {"source": "rolimons:itemdetails", **info}
+
+
+Now you won’t get a confusing “not found” when it’s really just the wrong ID kind.
+
+✅ Fix 2: Print/return the exact ID you’re using from playerassets (debug mode)
+
+Your enrichment assumes [assetId, uaid, ...]. That’s often true, but not always.
+
+Replace your for a in assets: loop with this safer extractor:
+
+def _extract_asset_id(entry) -> Optional[int]:
+    # Most common: [assetId, uaid, ...]
+    if isinstance(entry, (list, tuple)) and len(entry) >= 1:
+        try:
+            return int(entry[0])
+        except Exception:
+            return None
+
+    # Sometimes dict objects
+    if isinstance(entry, dict):
+        for k in ("assetId", "AssetId", "itemId", "item_id", "id"):
+            if k in entry:
+                try:
+                    return int(entry[k])
+                except Exception:
+                    return None
+        return None
+
+    # Sometimes already an int (assume assetId)
+    if isinstance(entry, int):
+        return entry
+
+    return None
+
+
+@app.get("/market/player/{username}/inventory")
+def market_player_inventory(username: str):
+    user_id = _username_to_user_id(username)
+    inv = _rolimons_playerassets(user_id)
+
+    assets = inv.get("playerAssets") or inv.get("assets") or inv.get("data")
+    enriched: List[Dict[str, Any]] = []
+    bad_entries: List[Any] = []
+
+    if isinstance(assets, list):
+        for a in assets:
+            asset_id = _extract_asset_id(a)
+
+            if asset_id is None:
+                bad_entries.append(a)
+                continue
+
+            try:
+                item_info = _extract_item_info_from_itemdetails(asset_id)
+            except HTTPException:
+                item_info = {
+                    "item_id": asset_id,
+                    "note": "assetId extracted but not found in itemdetails (may not be a limited/collectible).",
+                    "raw_entry": a
+                }
+
+            enriched.append(item_info)
+
+    return {
+        "source": "rolimons:playerassets",
+        "username": username,
+        "user_id": user_id,
+        "raw": inv,
+        "enriched_items": enriched,
+        "debug": {
+            "assets_count": len(assets) if isinstance(assets, list) else None,
+            "bad_entries_count": len(bad_entries),
+            "bad_entries_sample": bad_entries[:3],
+        },
+    }
+
+
+This will tell you instantly if your “asset_id” assumption is wrong.
+
+✅ Fix 3: Rolimon’s itemdetails only contains trackable items (not everything)
+
+Even if you pass a real catalog assetId, Rolimon’s itemdetails won’t return data if the item isn’t in their tracked set (typically limited/collectible market items). So “not found” can also mean:
+
+It’s not a limited / not tracked
+
+It’s a different item type (bundle, dev product, etc.)
+
+To help with that, update your error message in _extract_item_info_from_itemdetails:
+
+if not entry:
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "code": "ITEM_NOT_IN_ITEMDETAILS",
+            "message": "Item not found in Rolimon's itemdetails. This usually means the ID is not a limited/collectible assetId (or it's a UAID).",
+            "details": {"item_id": item_id}
+        },
+    )

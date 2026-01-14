@@ -1,0 +1,53 @@
+run = "source venv/bin/activate && python3 main.py"
+modules = ["python-3.11"]
+
+[nix]
+channel = "stable-23_11"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 8000
+externalPort = 8000
+
+[[ports]]
+localPort = 8008
+externalPort = 8008
+
+[agent]
+expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Backend API"
+
+[[workflows.workflow]]
+name = "Backend API"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+waitForPort = 5000
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["python", "main.py"]
+
+[userenv]
+
+[userenv.shared]
+ROBLOX_API_KEY = "HO80ncWboEGCcrHDqeHIr7+izlw6l7ozFYZ6JV6fQWm65enbZXlKaGJHY2lPaUpTVXpJMU5pSXNJbXRwWkNJNkluTnBaeTB5TURJeExUQTNMVEV6VkRFNE9qVXhPalE1V2lJc0luUjVjQ0k2SWtwWFZDSjkuZXlKaGRXUWlPaUpTYjJKc2IzaEpiblJsY201aGJDSXNJbWx6Y3lJNklrTnNiM1ZrUVhWMGFHVnVkR2xqWVhScGIyNVRaWEoyYVdObElpd2lZbUZ6WlVGd2FVdGxlU0k2SWtoUE9EQnVZMWRpYjBWSFEyTnlTRVJ4WlVoSmNqY3JhWHBzZHpac04yOTZSbGxhTmtwV05tWlJWMjAyTldWdVlpSXNJbTkzYm1WeVNXUWlPaUl5TnpNM09URTFNall6SWl3aVpYaHdJam94TnpZM09EUTFPRE0wTENKcFlYUWlPakUzTmpjNE5ESXlNelFzSW01aVppSTZNVGMyTnpnME1qSXpOSDAuT0JPbEd5RFBYTDJiSHl1OWZjSFNfRVNMNHBrVDF4dE5EQzdzeWhBR2lraDVkWkNaVXFhTS1oTlNCNnBVcFJfaldvdGZuR1duZXY5ZzQ0QzE4dkZJWHJKSmMzclE4VGJGbWNrdlBXbWNrRnN3ZHczbmY4aTJCckJ3WkRaUWNyREM3VUJ6QjBBekNBaDdpUDdTQm1nMmh3amk5QTg5dFl0Y09KLWpTYlBjeThiTldmYjMwYnRndWtKYmJWc1lYODRpd0NaekpKWWxHMWdvcTQ3dWRBb29VQkpKa2o1bUlfaU9ZVEhmeUtKZ3kzMnlLZHJ0TmJ1ZGJqaHlmbGR6MzJ1SWduT3ZpTnZUMUJzWDBSWWtRemJLRlVaVXdpbTlUVy1RQ2tsUmJIbjJsVlBjX2JlS1NicVBuQ2c2QlhNemxwbEpLYzdZbzFnMGpjdnhIWGZnUk9NbDN3"

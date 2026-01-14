@@ -1,0 +1,95 @@
+1️⃣ REMOVE these constants & helpers
+
+Delete:
+
+ROLIMONS_ITEMDETAILS_URL
+ROLIMONS_PLAYER_URL
+ROLIMONS_PLAYERASSETS_URL
+_get_itemdetails_cached
+_extract_item_info_from_itemdetails
+
+2️⃣ ADD Roblox endpoints
+
+Paste near config:
+
+ROBLOX_CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
+ROBLOX_RESALE_DATA_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-data"
+ROBLOX_RESALE_HISTORY_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-history"
+
+3️⃣ ADD helpers (Roblox-only stats engine)
+def get_catalog_details(asset_id: int) -> Dict[str, Any]:
+    payload = {"items": [{"itemType": "Asset", "id": asset_id}]}
+    data = _http_post_json(ROBLOX_CATALOG_DETAILS_URL, payload)
+    if not data.get("data"):
+        raise HTTPException(404, detail="Asset not found on Roblox")
+    return data["data"][0]
+
+
+def get_resale_data(asset_id: int) -> Dict[str, Any]:
+    return _http_get_json(ROBLOX_RESALE_DATA_URL.format(asset_id=asset_id))
+
+
+def get_resale_history(asset_id: int) -> Dict[str, Any]:
+    return _http_get_json(ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id))
+
+
+def compute_market_stats(resale: Dict, history: Dict) -> Dict[str, Any]:
+    prices = [p["price"] for p in history.get("data", []) if "price" in p]
+    if not prices:
+        return {
+            "fmv": None,
+            "rap_like": None,
+            "demand": "Unknown",
+            "trend": "Unknown",
+            "projected": False,
+        }
+
+    prices.sort()
+    median = prices[len(prices)//2]
+    avg = sum(prices) / len(prices)
+
+    volume = len(prices)
+    demand = "High" if volume > 20 else "Medium" if volume > 5 else "Low"
+
+    trend = "Rising" if prices[-1] > prices[0] else "Falling"
+
+    projected = prices[-1] > prices[0] * 1.5 and volume < 5
+
+    return {
+        "fmv": round(median),
+        "rap_like": round(avg),
+        "demand": demand,
+        "trend": trend,
+        "projected": projected,
+    }
+
+4️⃣ UPDATE /market/item/analyze (Rolimon’s-free)
+
+Replace the internals of that endpoint with:
+
+@app.post("/market/item/analyze")
+def analyze_item_from_catalog_link(catalog_url: str = Body(..., embed=True)):
+    asset_id = _asset_id_from_catalog_url(catalog_url)
+    if not asset_id:
+        raise HTTPException(400, detail="Invalid catalog link")
+
+    roblox = get_catalog_details(asset_id)
+    resale = get_resale_data(asset_id)
+    history = get_resale_history(asset_id)
+
+    stats = compute_market_stats(resale, history)
+
+    return {
+        "source": "roblox-only:full-analysis",
+        "catalog_url": catalog_url,
+        "asset_id": asset_id,
+        "roblox": roblox,
+        "market": stats,
+        "analysis": {
+            "recommended_metric": "fmv",
+            "notes": [
+                "All stats computed from Roblox resale data",
+                "No third-party sources used",
+            ],
+        },
+    }

@@ -1,0 +1,118 @@
+Flow for /market/item/{item_id} (one action):
+
+Roblox Catalog API
+Resolve whatever you have (search result / name / URL / partial ID) → canonical assetId
+
+Rolimon’s itemdetails
+Use that assetId → get RAP / Value / Demand / Trend
+
+This avoids:
+
+UAID confusion ❌
+
+inventory dependency ❌
+
+guessing ❌
+
+✅ Which Roblox endpoint to use (and when)
+1️⃣ search.roblox.com / catalog.roblox.com/v1/search/items
+
+Use this when you have:
+
+item name
+
+keyword
+
+fuzzy input (from apps like Rotari)
+
+Example use cases:
+
+"Dominus"
+
+"Valkyrie"
+
+"Red Sparkle Time Fedora"
+
+This returns catalog items, each with an id → this is the assetId.
+
+2️⃣ catalog.roblox.com/v1/catalog/items/details
+
+Use this when you already have:
+
+a numeric ID
+
+a catalog URL
+
+something that might be an assetId but you want to verify
+
+This confirms:
+
+item exists
+
+itemType is Asset
+
+item is a collectible / limited
+
+✅ EXACT implementation for /market/item/{item_id} (this is the fix)
+
+You asked specifically not to redesign the system — so here is the drop-in logic to upgrade your existing endpoint.
+
+Replace your /market/item/{item_id} with this:
+ROBLOX_CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
+
+def _roblox_verify_asset_id(asset_id: int) -> bool:
+    payload = {
+        "items": [
+            {"itemType": "Asset", "id": asset_id}
+        ]
+    }
+    data = _http_post_json(ROBLOX_CATALOG_DETAILS_URL, payload)
+    return bool(data.get("data"))
+
+
+@app.get("/market/item/{item_id}")
+def market_item(item_id: int):
+    """
+    One action:
+    Roblox verifies assetId -> Rolimons stats
+    """
+
+    # 1️⃣ obvious UAID / instance id guard
+    if item_id >= 1_000_000_000:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "LIKELY_WRONG_ID_TYPE",
+                "message": "This looks like a UAID/userAssetId, not a catalog assetId.",
+                "details": {"received": item_id},
+            },
+        )
+
+    # 2️⃣ verify asset exists on Roblox catalog
+    exists = _roblox_verify_asset_id(item_id)
+    if not exists:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ASSET_NOT_FOUND_ON_ROBLOX",
+                "message": "Asset ID does not exist on Roblox catalog.",
+                "details": {"asset_id": item_id},
+            },
+        )
+
+    # 3️⃣ fetch Rolimons stats
+    try:
+        info = _extract_item_info_from_itemdetails(item_id)
+        return {
+            "source": "roblox->rolimons",
+            **info,
+        }
+    except HTTPException:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ITEM_NOT_IN_ITEMDETAILS",
+                "message": "Item exists on Roblox but is not tracked by Rolimon's (likely not a limited/collectible).",
+                "details": {"asset_id": item_id},
+            },
+        )

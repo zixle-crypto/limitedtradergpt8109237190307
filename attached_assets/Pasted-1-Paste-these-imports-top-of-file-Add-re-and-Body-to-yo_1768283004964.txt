@@ -1,0 +1,217 @@
+1) Paste these imports (top of file)
+
+Add re and Body to your imports:
+
+import re
+from fastapi import Body
+
+2) Paste these constants (near your config)
+ROBLOX_CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
+ROBLOX_CATALOG_SEARCH_URL = "https://catalog.roblox.com/v1/search/items"
+
+3) Paste these helper functions (under your Helpers section)
+def _asset_id_from_catalog_url(url: str) -> Optional[int]:
+    # Accepts URLs like: https://www.roblox.com/catalog/1029025/Some-Item-Name
+    m = re.search(r"/catalog/(\d+)", url)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _roblox_catalog_details(asset_id: int) -> Dict[str, Any]:
+    payload = {"items": [{"itemType": "Asset", "id": asset_id}]}
+    data = _http_post_json(ROBLOX_CATALOG_DETAILS_URL, payload)
+    arr = data.get("data")
+    if not isinstance(arr, list) or len(arr) == 0:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "ASSET_NOT_FOUND_ON_ROBLOX",
+                "message": "Asset ID does not exist on Roblox catalog.",
+                "details": {"asset_id": asset_id},
+            },
+        )
+    return arr[0]
+
+4) ADD: the new “catalog link → full pro analysis” endpoint
+
+Paste this under your routes:
+
+@app.post("/market/item/analyze")
+def analyze_item_from_catalog_link(
+    catalog_url: str = Body(..., embed=True),
+):
+    """
+    Paste a Roblox catalog link -> returns Roblox details + Rolimons stats + computed professional analysis.
+    """
+    asset_id = _asset_id_from_catalog_url(catalog_url)
+    if asset_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "NEEDS_CATALOG_LINK",
+                "message": "Please paste a Roblox catalog link like https://www.roblox.com/catalog/<assetId>/...",
+                "details": {"catalog_url": catalog_url},
+            },
+        )
+
+    # Guard against UAID-like IDs in the link (rare but safe)
+    if asset_id >= 1_000_000_000:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "LIKELY_WRONG_ID_TYPE",
+                "message": "This looks like a UAID/userAssetId, not a catalog assetId. Paste the /catalog/<assetId>/ link.",
+                "details": {"received": asset_id, "catalog_url": catalog_url},
+            },
+        )
+
+    # 1) Roblox catalog details (authoritative metadata)
+    roblox = _roblox_catalog_details(asset_id)
+
+    # 2) Rolimons stats (market stats) — may not exist for non-limiteds
+    try:
+        rolimons = _extract_item_info_from_itemdetails(asset_id)
+        roli_ok = True
+    except HTTPException:
+        rolimons = {
+            "item_id": asset_id,
+            "note": "Item exists on Roblox but is not in Rolimon's itemdetails (likely not a limited/collectible).",
+        }
+        roli_ok = False
+
+    # 3) Compute “pro analysis” (audit-friendly; no guessing)
+    rap = rolimons.get("rap") if isinstance(rolimons, dict) else None
+    value = rolimons.get("value") if isinstance(rolimons, dict) else None
+
+    # Choose pricing metric (Value preferred, else RAP)
+    metric_name = None
+    metric_value = None
+    if isinstance(value, int) and value > 0:
+        metric_name = "value"
+        metric_value = value
+    elif isinstance(rap, int) and rap > 0:
+        metric_name = "rap"
+        metric_value = rap
+
+    demand = rolimons.get("demand") if isinstance(rolimons, dict) else None
+    trend = rolimons.get("trend") if isinstance(rolimons, dict) else None
+    projected = rolimons.get("projected") if isinstance(rolimons, dict) else None
+
+    risk_flags = []
+    if projected not in (None, 0, False, -1) and roli_ok:
+        risk_flags.append("Projected flag present (treat price signals cautiously).")
+    if demand in (0, 1) and roli_ok:
+        risk_flags.append("Low demand score (harder to trade).")
+    if trend in (0, 1) and roli_ok:
+        risk_flags.append("Weak trend score (slower movement).")
+
+    confidence_notes = []
+    confidence_notes.append("Roblox catalog details are authoritative for item identity (assetId/name/type).")
+    if roli_ok:
+        confidence_notes.append("Rolimon's stats are from itemdetails (cached on your bridge).")
+    else:
+        confidence_notes.append("Rolimon's had no itemdetails entry for this assetId (not tracked or not a limited).")
+
+    # Return a “maxed out” response object
+    return {
+        "source": "roblox+rolimons:full-analysis",
+        "catalog_url": catalog_url,
+        "asset_id": asset_id,
+        "roblox": roblox,      # full raw Roblox details object
+        "rolimons": rolimons,  # normalized stats or note
+        "computed": {
+            "pricing_metric_used": metric_name,
+            "pricing_metric_value": metric_value,
+            "risk_flags": risk_flags,
+            "has_rolimons_market_stats": roli_ok,
+            "summary": {
+                "asset_id": asset_id,
+                "name_guess": roblox.get("name"),
+                "rap": rap,
+                "value": value,
+                "demand": demand,
+                "trend": trend,
+                "projected": projected,
+            },
+        },
+        "confidence_notes": confidence_notes,
+    }
+
+5) OPTIONAL: make your existing /market/item/search return “richer” results
+
+If you already added /market/item/search, you can upgrade it to include Roblox result snippets too.
+
+Replace your search endpoint with this (optional):
+
+@app.get("/market/item/search")
+def search_item_then_get_stats(q: str, limit: int = 5):
+    params = {
+        "keyword": q,
+        "limit": min(max(limit, 1), 10),
+        "sortType": "Relevance",
+        "category": "All",
+    }
+
+    data = _http_get_json(ROBLOX_CATALOG_SEARCH_URL, params=params)
+    items = data.get("data", [])
+
+    if not items:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "NO_SEARCH_RESULTS",
+                "message": "No catalog items found for search query.",
+                "details": {"query": q},
+            },
+        )
+
+    results = []
+    for it in items:
+        asset_id = it.get("id")
+        if not isinstance(asset_id, int):
+            continue
+
+        # Try Rolimons stats
+        try:
+            roli = _extract_item_info_from_itemdetails(asset_id)
+            results.append({
+                "source": "roblox-search->rolimons",
+                "item_id": asset_id,
+                "roblox": it,
+                "rolimons": roli,
+            })
+        except HTTPException:
+            # include it anyway so user can see it exists, even if not tracked
+            results.append({
+                "source": "roblox-search->rolimons",
+                "item_id": asset_id,
+                "roblox": it,
+                "rolimons": {"note": "Not tracked in Rolimon's itemdetails."},
+            })
+
+    return {"source": "roblox-search->rolimons", "query": q, "results": results}
+
+How you use it (exact)
+If user asks for “Valkyrie Helm stats”
+
+You respond:
+“Paste the Roblox catalog link”
+
+Then they paste something like:
+https://www.roblox.com/catalog/1029025/Valkyrie-Helm
+
+Call:
+POST /market/item/analyze
+Body:
+
+{"catalog_url":"https://www.roblox.com/catalog/1029025/Valkyrie-Helm"}
+
+
+It returns:
+
+Roblox full details
+
+Rolimon’s market stats (if tracked)
+
+computed professional summary + risk flags
