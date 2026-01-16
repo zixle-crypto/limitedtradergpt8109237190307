@@ -61,7 +61,16 @@ def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[st
 
 def _http_post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
+        # First attempt
         r = session.post(url, json=payload, timeout=TIMEOUT_S)
+        
+        # If we get 403 and there's an X-CSRF-TOKEN header, retry with the token
+        if r.status_code == 403 and 'x-csrf-token' in r.headers:
+            csrf_token = r.headers['x-csrf-token']
+            session.headers.update({'X-CSRF-TOKEN': csrf_token})
+            # Retry the request with the token
+            r = session.post(url, json=payload, timeout=TIMEOUT_S)
+            
         if r.status_code == 429:
             api_error(429, "RATE_LIMITED", "Rate limited by upstream API")
         if r.status_code >= 400:

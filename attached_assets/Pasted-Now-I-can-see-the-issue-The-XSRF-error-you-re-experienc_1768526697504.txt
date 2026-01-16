@@ -1,0 +1,49 @@
+Now I can see the issue. The XSRF error you're experiencing with the Roblox API is likely happening because certain Roblox endpoints require an X-CSRF-TOKEN header for POST requests. This is a security mechanism Roblox uses to prevent cross-site request forgery attacks.
+
+Here's what's happening:
+
+Your /market/item/analyze endpoint calls get_catalog_details() which makes a POST request to Roblox's catalog API
+Your /market/item/search endpoint uses GET (which works fine)
+POST requests to Roblox APIs require an X-CSRF-TOKEN header
+The solution: You need to implement a token refresh mechanism that:
+
+Makes an initial request (which will fail with 403 and return the token in headers)
+Extracts the X-CSRF-TOKEN from the response headers
+Retries the request with the token included
+However, before I make code changes, let me create a spec to properly document this fix. This will help ensure we implement it correctly and can track the work.
+
+Let me explain the issue and the fix directly:
+
+The XSRF Error Problem
+The error occurs because Roblox requires an X-CSRF-TOKEN header for POST requests. Here's what's happening:
+
+When you use the /market/item/analyze endpoint, it calls _http_post_json() to POST to Roblox's catalog API
+Roblox rejects the request with a 403 error and includes the required token in the response headers
+Your code needs to catch this, extract the token, and retry with the token included
+The Fix
+You need to modify the _http_post_json() function to handle XSRF tokens:
+
+
+def _http_post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        # First attempt
+        r = session.post(url, json=payload, timeout=TIMEOUT_S)
+        
+        # If we get 403 and there's an X-CSRF-TOKEN header, retry with the token
+        if r.status_code == 403 and 'x-csrf-token' in r.headers:
+            csrf_token = r.headers['x-csrf-token']
+            session.headers.update({'X-CSRF-TOKEN': csrf_token})
+            # Retry the request with the token
+            r = session.post(url, json=payload, timeout=TIMEOUT_S)
+        
+        if r.status_code == 429:
+            api_error(429, "RATE_LIMITED", "Rate limited by upstream API")
+        if r.status_code >= 400:
+            api_error(502, "UPSTREAM_ERROR", f"Upstream error {r.status_code}: {r.text[:300]}")
+        try:
+            return r.json()
+        except Exception:
+            api_error(502, "UPSTREAM_NON_JSON", "Upstream returned non-JSON")
+    except requests.RequestException as e:
+        api_error(502, "UPSTREAM_REQUEST_FAILED", f"Upstream request failed: {e}")
+    return {}
