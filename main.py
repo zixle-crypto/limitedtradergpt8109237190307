@@ -31,6 +31,8 @@ ROBLOX_CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/detail
 ROBLOX_CATALOG_SEARCH_URL = "https://catalog.roblox.com/v1/search/items"
 ROBLOX_RESALE_DATA_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-data"
 ROBLOX_RESALE_HISTORY_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-history"
+ROBLOX_MARKETPLACE_SALES_RESALE_DATA = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-data"
+ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-history"
 
 session = requests.Session()
 session.headers.update({"User-Agent": "RoliBridge/1.0"})
@@ -115,11 +117,34 @@ def get_catalog_details(asset_id: int) -> Dict[str, Any]:
     return first_item
 
 
-def get_resale_data(asset_id: int) -> Dict[str, Any]:
+def _extract_collectible_item_id(roblox_details: Dict[str, Any]) -> Optional[str]:
+    # Common field names seen in the wild:
+    # - collectibleItemId
+    # - collectibleItemId in nested "collectible" object
+    for k in ("collectibleItemId", "collectible_item_id"):
+        v = roblox_details.get(k)
+        if v:
+            return str(v)
+
+    collectible = roblox_details.get("collectible")
+    if isinstance(collectible, dict):
+        v = collectible.get("collectibleItemId") or collectible.get("id")
+        if v:
+            return str(v)
+
+    return None
+
+
+def get_resale_data_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
+    # Prefer collectible system if available
+    if collectible_item_id:
+        return _http_get_json(ROBLOX_MARKETPLACE_SALES_RESALE_DATA.format(collectible_item_id=collectible_item_id))
     return _http_get_json(ROBLOX_RESALE_DATA_URL.format(asset_id=asset_id))
 
 
-def get_resale_history(asset_id: int) -> Dict[str, Any]:
+def get_resale_history_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
+    if collectible_item_id:
+        return _http_get_json(ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY.format(collectible_item_id=collectible_item_id))
     return _http_get_json(ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id))
 
 
@@ -201,12 +226,15 @@ def health():
 @app.get("/market/item/{item_id}")
 def market_item(item_id: int):
     roblox = get_catalog_details(item_id)
-    resale = get_resale_data(item_id)
-    history = get_resale_history(item_id)
+    collectible_item_id = _extract_collectible_item_id(roblox)
+    
+    resale = get_resale_data_dual(item_id, collectible_item_id)
+    history = get_resale_history_dual(item_id, collectible_item_id)
     stats = compute_market_stats(resale, history)
     return {
         "source": "roblox-only",
         "item_id": item_id,
+        "collectible_item_id": collectible_item_id,
         "roblox": roblox,
         "market": stats
     }
@@ -247,19 +275,49 @@ def analyze_item_from_catalog_link(catalog_url: str = Body(..., embed=True)):
     if asset_id_opt is None:
         api_error(400, "INVALID_LINK", "Invalid catalog link")
     asset_id: int = asset_id_opt  # type: ignore
+    
     roblox = get_catalog_details(asset_id)
-    resale = get_resale_data(asset_id)
-    history = get_resale_history(asset_id)
-    stats = compute_market_stats(resale, history)
+    collectible_item_id = _extract_collectible_item_id(roblox)
+
+    resale_data = None
+    resale_history = None
+    market_notes = []
+
+    try:
+        resale_data = get_resale_data_dual(asset_id, collectible_item_id)
+    except HTTPException as e:
+        market_notes.append(f"Resale-data unavailable (status {e.status_code}).")
+
+    try:
+        resale_history = get_resale_history_dual(asset_id, collectible_item_id)
+    except HTTPException as e:
+        market_notes.append(f"Resale-history unavailable (status {e.status_code}).")
+
+    market = {
+        "fmv": None,
+        "rap_like": None,
+        "demand": "Unknown",
+        "trend": "Unknown",
+        "projected": False,
+    }
+
+    if resale_history and isinstance(resale_history, dict) and resale_history.get("data"):
+        market = compute_market_stats(resale_data or {}, resale_history)
+
     return {
         "source": "roblox-only:full-analysis",
         "catalog_url": catalog_url,
         "asset_id": asset_id,
         "roblox": roblox,
-        "market": stats,
+        "collectible_item_id": collectible_item_id,
+        "resale_data": resale_data,
+        "resale_history": resale_history,
+        "market": market,
         "analysis": {
-            "recommended_metric": "fmv",
-            "notes": ["All stats computed from Roblox resale data", "No third-party sources used"],
+            "notes": [
+                "Roblox catalog details fetched successfully.",
+                *market_notes,
+            ],
         },
     }
 
