@@ -34,6 +34,9 @@ ROBLOX_RESALE_HISTORY_URL = "https://economy.roblox.com/v1/assets/{asset_id}/res
 ROBLOX_MARKETPLACE_SALES_RESALE_DATA = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-data"
 ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-history"
 
+DEFAULT_HISTORY_POINTS = 60   # last 60 points (safe)
+MAX_HISTORY_POINTS = 200      # hard cap to avoid huge payloads
+
 session = requests.Session()
 session.headers.update({"User-Agent": "RoliBridge/1.0"})
 
@@ -133,6 +136,17 @@ def _extract_collectible_item_id(roblox_details: Dict[str, Any]) -> Optional[str
             return str(v)
 
     return None
+
+
+def _truncate_history(history: Dict[str, Any], limit: int) -> Dict[str, Any]:
+    if not isinstance(history, dict):
+        return history
+    data = history.get("data")
+    if isinstance(data, list) and len(data) > limit:
+        return {**history, "data": data[-limit:], "truncated": True, "returned_points": limit, "total_points": len(data)}
+    if isinstance(data, list):
+        return {**history, "truncated": False, "returned_points": len(data), "total_points": len(data)}
+    return history
 
 
 def get_resale_data_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
@@ -270,7 +284,11 @@ def search_item_then_get_stats(q: str, limit: int = 5):
 
 
 @app.post("/market/item/analyze")
-def analyze_item_from_catalog_link(catalog_url: str = Body(..., embed=True)):
+def analyze_item_from_catalog_link(
+    catalog_url: str = Body(..., embed=True),
+    include_raw: bool = Query(False),
+    history_points: int = Query(DEFAULT_HISTORY_POINTS, ge=0, le=MAX_HISTORY_POINTS),
+):
     asset_id_opt = _asset_id_from_catalog_url(catalog_url)
     if asset_id_opt is None:
         api_error(400, "INVALID_LINK", "Invalid catalog link")
@@ -299,27 +317,41 @@ def analyze_item_from_catalog_link(catalog_url: str = Body(..., embed=True)):
         "demand": "Unknown",
         "trend": "Unknown",
         "projected": False,
+        "history_points_used": 0,
     }
 
-    if resale_history and isinstance(resale_history, dict) and resale_history.get("data"):
-        market = compute_market_stats(resale_data or {}, resale_history)
+    if resale_history and isinstance(resale_history, dict) and isinstance(resale_history.get("data"), list):
+        points = resale_history["data"]
+        if history_points == 0:
+            used = []
+        else:
+            used = points[-history_points:] if len(points) > history_points else points
 
-    return {
+        market = compute_market_stats(resale_data or {}, {"data": used})
+        market["history_points_used"] = len(used)
+        resale_history = _truncate_history(resale_history, history_points)
+
+    response = {
         "source": "roblox-only:full-analysis",
         "catalog_url": catalog_url,
         "asset_id": asset_id,
-        "roblox": roblox,
         "collectible_item_id": collectible_item_id,
-        "resale_data": resale_data,
-        "resale_history": resale_history,
+        "roblox": roblox,
         "market": market,
         "analysis": {
             "notes": [
                 "Roblox catalog details fetched successfully.",
                 *market_notes,
+                "Raw resale datasets are omitted by default to avoid large responses.",
             ],
         },
     }
+
+    if include_raw:
+        response["resale_data"] = resale_data
+        response["resale_history"] = resale_history
+
+    return response
 
 
 @app.get("/market/player/{username}")

@@ -1,0 +1,205 @@
+Yep — that error means your /market/item/analyze is returning too much JSON, usually because resale-history can be HUGE (years of data points). The tool that reads your API has a payload limit, so it refuses to process it.
+
+✅ Fix: don’t return the full raw dataset. Return:
+
+a compact summary (best price, volume, percentiles, trend, etc.)
+
+only the last N history points (or none by default)
+
+This is also more “professional” because it focuses on signal, not dumping raw.
+
+1) Patch your Python bridge (drop-in)
+A) Add these defaults near config
+DEFAULT_HISTORY_POINTS = 60   # last 60 points (safe)
+MAX_HISTORY_POINTS = 200      # hard cap to avoid huge payloads
+
+B) Add this helper to truncate history
+def _truncate_history(history: Dict[str, Any], limit: int) -> Dict[str, Any]:
+    if not isinstance(history, dict):
+        return history
+    data = history.get("data")
+    if isinstance(data, list) and len(data) > limit:
+        return {**history, "data": data[-limit:], "truncated": True, "returned_points": limit, "total_points": len(data)}
+    if isinstance(data, list):
+        return {**history, "truncated": False, "returned_points": len(data), "total_points": len(data)}
+    return history
+
+C) Update /market/item/analyze to be compact by default
+
+Replace your endpoint signature + return with this version:
+
+from fastapi import Body, Query
+
+@app.post("/market/item/analyze")
+def analyze_item_from_catalog_link(
+    catalog_url: str = Body(..., embed=True),
+    include_raw: bool = Query(False),
+    history_points: int = Query(DEFAULT_HISTORY_POINTS, ge=0, le=MAX_HISTORY_POINTS),
+):
+    asset_id = _asset_id_from_catalog_url(catalog_url)
+    if not asset_id:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_CATALOG_LINK", "message": "Catalog link must contain /catalog/<assetId>/."},
+        )
+
+    roblox = get_catalog_details(asset_id)
+    collectible_item_id = _extract_collectible_item_id(roblox)
+
+    resale_data = None
+    resale_history = None
+    market_notes = []
+
+    # Fetch resale data/history (may 404 on some items)
+    try:
+        resale_data = get_resale_data_dual(asset_id, collectible_item_id)
+    except HTTPException as e:
+        market_notes.append(f"Resale-data unavailable (status {e.status_code}).")
+
+    try:
+        resale_history = get_resale_history_dual(asset_id, collectible_item_id)
+    except HTTPException as e:
+        market_notes.append(f"Resale-history unavailable (status {e.status_code}).")
+
+    # Default compact market result
+    market = {
+        "fmv": None,
+        "rap_like": None,
+        "demand": "Unknown",
+        "trend": "Unknown",
+        "projected": False,
+        "history_points_used": 0,
+    }
+
+    # Compute stats if history exists
+    if resale_history and isinstance(resale_history, dict) and isinstance(resale_history.get("data"), list):
+        # Use only the last N points for computation (stable + lightweight)
+        points = resale_history["data"]
+        if history_points == 0:
+            used = []
+        else:
+            used = points[-history_points:] if len(points) > history_points else points
+
+        # Build a minimal history object for compute_market_stats
+        market = compute_market_stats(resale_data or {}, {"data": used})
+        market["history_points_used"] = len(used)
+
+        # Truncate raw history for output safety if include_raw is true
+        resale_history = _truncate_history(resale_history, history_points)
+
+    response = {
+        "source": "roblox-only:full-analysis",
+        "catalog_url": catalog_url,
+        "asset_id": asset_id,
+        "collectible_item_id": collectible_item_id,
+        "roblox": roblox,
+        "market": market,
+        "analysis": {
+            "notes": [
+                "Roblox catalog details fetched successfully.",
+                *market_notes,
+                "Raw resale datasets are omitted by default to avoid large responses.",
+            ],
+        },
+    }
+
+    # Only include raw payloads if explicitly requested
+    if include_raw:
+        response["resale_data"] = resale_data
+        response["resale_history"] = resale_history
+
+    return response
+
+
+✅ Now your analyzer won’t blow up the tool limit.
+
+2) How to use it
+Default (SAFE + compact)
+
+POST /market/item/analyze with body:
+
+{"catalog_url":"https://www.roblox.com/catalog/102607079/Builderman-Egg"}
+
+If you really want raw (still capped)
+
+POST /market/item/analyze?include_raw=true&history_points=60
+
+If you want “maxed analysis” without raw spam
+
+Keep include_raw=false and raise points:
+history_points=200 (max)
+
+3) Updated schema (only the changed endpoint)
+
+Here’s the valid OpenAPI snippet for /market/item/analyze reflecting the new query params + compact output:
+
+  /market/item/analyze:
+    post:
+      operationId: analyze_item_from_catalog_link
+      summary: Full analysis from Roblox catalog link
+      description: Returns Roblox details + computed market stats. Raw resale payloads are omitted by default.
+      parameters:
+        - name: include_raw
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: history_points
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 200
+            default: 60
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [catalog_url]
+              properties:
+                catalog_url:
+                  type: string
+                  example: https://www.roblox.com/catalog/102607079/Builderman-Egg
+      responses:
+        "200":
+          description: Analysis response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source:
+                    type: string
+                  catalog_url:
+                    type: string
+                  asset_id:
+                    type: integer
+                  collectible_item_id:
+                    type: string
+                    nullable: true
+                  roblox:
+                    type: object
+                    properties: {}
+                    additionalProperties: true
+                  market:
+                    type: object
+                    properties: {}
+                    additionalProperties: true
+                  analysis:
+                    type: object
+                    properties: {}
+                    additionalProperties: true
+                  resale_data:
+                    type: object
+                    nullable: true
+                    properties: {}
+                    additionalProperties: true
+                  resale_history:
+                    type: object
+                    nullable: true
+                    properties: {}
+                    additionalProperties: true
