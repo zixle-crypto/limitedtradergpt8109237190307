@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import time
+import math
 import re
 from typing import Any, Dict, Optional, List
+from statistics import median
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Body
@@ -162,38 +163,171 @@ def get_resale_history_dual(asset_id: int, collectible_item_id: Optional[str]) -
     return _http_get_json(ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id))
 
 
-def compute_market_stats(resale: Dict, history: Dict) -> Dict[str, Any]:
-    history_data = history.get("data")
-    if not isinstance(history_data, list):
-        history_data = []
+def _extract_prices_from_history(history: Dict[str, Any]) -> List[float]:
+    """
+    Roblox resale-history formats vary. We try multiple keys safely.
+    Expected: {"data":[{"date":"...","value":123}, ...]} or {"data":[{"price":...}, ...]}
+    """
+    out: List[float] = []
+    data = history.get("data")
+    if not isinstance(data, list):
+        return out
 
-    prices = [p["price"] for p in history_data if isinstance(p, dict) and "price" in p]
-    if not prices:
+    for p in data:
+        if not isinstance(p, dict):
+            continue
+
+        # common keys
+        for k in ("price", "value", "avgPrice", "averagePrice", "mean", "rap"):
+            v = p.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                out.append(float(v))
+                break
+
+    return out
+
+
+def _trim_outliers(prices: List[float], lower_q: float = 0.05, upper_q: float = 0.95) -> List[float]:
+    if len(prices) < 20:
+        return prices[:]  # too few points; don't trim
+    s = sorted(prices)
+    lo = int(len(s) * lower_q)
+    hi = int(len(s) * upper_q)
+    hi = max(hi, lo + 1)
+    return s[lo:hi]
+
+
+def _ema(values: List[float], alpha: float) -> float:
+    if not values:
+        return float("nan")
+    ema = values[0]
+    for v in values[1:]:
+        ema = alpha * v + (1 - alpha) * ema
+    return ema
+
+
+def compute_market_stats(resale_data: Dict[str, Any], resale_history: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Produces a professional, explainable market summary from Roblox-only resale data.
+    """
+    raw_prices = _extract_prices_from_history(resale_history)
+    points = len(raw_prices)
+
+    # Pull best price / lowest price if available
+    best_price = resale_data.get("lowestPrice") or resale_data.get("bestPrice") or resale_data.get("price")
+    if not isinstance(best_price, (int, float)) or best_price <= 0:
+        best_price = None
+
+    # If no history, still return a useful analysis object
+    if points == 0:
         return {
             "fmv": None,
             "rap_like": None,
+            "best_price": best_price,
+            "spread": None,
+            "volatility": None,
             "demand": "Unknown",
             "trend": "Unknown",
+            "momentum": "Unknown",
             "projected": False,
+            "confidence": 0,
+            "history_points_used": 0,
+            "notes": [
+                "No usable resale-history price points were returned by Roblox for the selected window.",
+                "If this item is resellable, try increasing history_points or ensure the collectible resale endpoint is used.",
+            ],
         }
 
-    prices.sort()
-    median = prices[len(prices)//2]
-    avg = sum(prices) / len(prices)
+    # Clean + compute
+    trimmed = _trim_outliers(raw_prices)
+    trimmed_points = len(trimmed)
 
-    volume = len(prices)
-    demand = "High" if volume > 20 else "Medium" if volume > 5 else "Low"
+    # FMV = median of trimmed points (robust)
+    fmv = int(round(median(trimmed)))
 
-    trend = "Rising" if prices[-1] > prices[0] else "Falling"
+    # RAP-like = mean of trimmed points
+    rap_like = int(round(sum(trimmed) / trimmed_points))
 
-    projected = prices[-1] > prices[0] * 1.5 and volume < 5
+    # Volatility = std/mean (coefficient of variation)
+    mean = sum(trimmed) / trimmed_points
+    var = sum((x - mean) ** 2 for x in trimmed) / max(trimmed_points - 1, 1)
+    std = math.sqrt(var)
+    volatility = float(std / mean) if mean > 0 else None
+
+    # Trend & momentum: compare short EMA vs long EMA using chronological order
+    # Use raw_prices order as provided (assumed chronological); if reversed it still gives a consistent signal.
+    short = _ema(raw_prices[-min(14, points):], alpha=0.35)  # recent
+    long = _ema(raw_prices[-min(60, points):], alpha=0.12)   # broader
+    if math.isnan(short) or math.isnan(long):
+        trend = "Unknown"
+        momentum = "Unknown"
+    else:
+        if short > long * 1.03:
+            trend = "Rising"
+            momentum = "Bullish"
+        elif short < long * 0.97:
+            trend = "Falling"
+            momentum = "Bearish"
+        else:
+            trend = "Sideways"
+            momentum = "Neutral"
+
+    # Demand proxy: points count in window
+    if points >= 50:
+        demand = "High"
+    elif points >= 15:
+        demand = "Medium"
+    else:
+        demand = "Low"
+
+    # Projected heuristic: sharp spike + low volume OR high volatility
+    projected = False
+    if points < 10:
+        # small sample: if last price is far above median, flag
+        if raw_prices[-1] > fmv * 1.35:
+            projected = True
+    else:
+        if raw_prices[-1] > fmv * 1.4 and demand in ("Low", "Medium"):
+            projected = True
+        if volatility is not None and volatility > 0.25 and demand == "Low":
+            projected = True
+
+    # Spread: difference between best price and FMV
+    spread = None
+    if best_price is not None:
+        spread = int(round(best_price - fmv))
+
+    # Confidence: based on sample size, trimmed points, and volatility
+    conf = 0
+    conf += min(points, 80) / 80 * 60  # up to 60
+    if volatility is not None:
+        conf += max(0, 20 - (volatility * 40))  # penalize volatility
+    conf += 20 if best_price is not None else 0
+    confidence = int(max(0, min(100, round(conf))))
+
+    notes = []
+    if trimmed_points != points:
+        notes.append(f"Outliers trimmed: used {trimmed_points}/{points} points for robust FMV.")
+    if best_price is None:
+        notes.append("Best/lowest price not available from resale-data endpoint.")
+    if points < 10:
+        notes.append("Low sample size: demand/trend confidence reduced.")
+    if projected:
+        notes.append("Projected-risk flag: price behavior looks spiky relative to volume/volatility.")
 
     return {
-        "fmv": round(median),
-        "rap_like": round(avg),
+        "fmv": fmv,
+        "rap_like": rap_like,
+        "best_price": best_price,
+        "spread": spread,
+        "volatility": None if volatility is None else round(volatility, 4),
         "demand": demand,
         "trend": trend,
+        "momentum": momentum,
         "projected": projected,
+        "confidence": confidence,
+        "history_points_used": points,
+        "notes": notes,
     }
 
 
