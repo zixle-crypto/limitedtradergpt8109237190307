@@ -34,6 +34,7 @@ ROBLOX_RESALE_DATA_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale
 ROBLOX_RESALE_HISTORY_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-history"
 ROBLOX_MARKETPLACE_SALES_RESALE_DATA = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-data"
 ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-history"
+ROBLOX_RESELLERS_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resellers"
 
 DEFAULT_HISTORY_POINTS = 60   # last 60 points (safe)
 MAX_HISTORY_POINTS = 200      # hard cap to avoid huge payloads
@@ -161,6 +162,31 @@ def get_resale_history_dual(asset_id: int, collectible_item_id: Optional[str]) -
     if collectible_item_id:
         return _http_get_json(ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY.format(collectible_item_id=collectible_item_id))
     return _http_get_json(ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id))
+
+
+def get_resellers(asset_id: int, limit: int = 30) -> Dict[str, Any]:
+    # limit is supported on some variants; safe to pass
+    return _http_get_json(ROBLOX_RESELLERS_URL.format(asset_id=asset_id), params={"limit": min(max(limit, 1), 100)})
+
+
+def summarize_resellers(resellers_payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = resellers_payload.get("data")
+    if not isinstance(data, list) or not data:
+        return {"count": 0, "lowest_price": None, "top_5": []}
+
+    # entries often look like {"price":935,"seller":{...},"serialNumber":...}
+    prices = []
+    top = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        p = row.get("price")
+        if isinstance(p, (int, float)) and p > 0:
+            prices.append(int(p))
+            if len(top) < 5:
+                top.append({"price": int(p), "serialNumber": row.get("serialNumber")})
+    prices.sort()
+    return {"count": len(prices), "lowest_price": prices[0] if prices else None, "top_5": top}
 
 
 def _extract_prices_from_history(history: Dict[str, Any]) -> List[float]:
@@ -331,6 +357,72 @@ def compute_market_stats(resale_data: Dict[str, Any], resale_history: Dict[str, 
     }
 
 
+def trader_scorecard(market: Dict[str, Any], listings: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Returns flip-focused signals:
+    - liquidity score (0-100)
+    - spread opportunities
+    - entry/exit guidance
+    """
+    fmv = market.get("fmv")
+    rap_like = market.get("rap_like")
+    best = market.get("best_price")  # from resale-data
+    lowest = listings.get("lowest_price")
+
+    # Choose entry price
+    entry = lowest or best
+    metric = fmv or rap_like
+
+    if entry is None or metric is None:
+        return {
+            "flip_signal": "AVOID",
+            "liquidity_score": 10 if market.get("demand") == "Low" else 20,
+            "edge_percent": None,
+            "entry_price": entry,
+            "target_exit": None,
+            "reason": "Insufficient pricing signals (missing entry price or FMV/RAP-like)."
+        }
+
+    edge = (metric - entry) / entry * 100.0
+
+    # Liquidity score based on demand + history points
+    demand = market.get("demand")
+    pts = market.get("history_points_used") or 0
+    liq = 20
+    if demand == "High":
+        liq = 85
+    elif demand == "Medium":
+        liq = 60
+    elif demand == "Low":
+        liq = 35
+    else:
+        liq = 25
+
+    if pts < 10:
+        liq = max(10, liq - 20)
+
+    # Profit-minded verdict
+    if edge >= 10 and liq >= 50 and not market.get("projected", False):
+        flip = "FLIP"
+        target = int(round(entry * 1.12))
+    elif edge >= 5 and liq >= 40:
+        flip = "MAYBE"
+        target = int(round(entry * 1.08))
+    else:
+        flip = "AVOID"
+        target = int(round(entry * 1.05))
+
+    return {
+        "flip_signal": flip,
+        "liquidity_score": liq,
+        "edge_percent": round(edge, 2),
+        "entry_price": int(entry),
+        "target_exit": target,
+        "metric_used": "fmv" if fmv is not None else "rap_like",
+        "risk_notes": market.get("notes", []),
+    }
+
+
 def _asset_id_from_catalog_url(url: str) -> Optional[int]:
     m = re.search(r"/catalog/(\d+)", url)
     if m:
@@ -465,6 +557,17 @@ def analyze_item_from_catalog_link(
         market["history_points_used"] = len(used)
         resale_history = _truncate_history(resale_history, history_points)
 
+    # Listings snapshot (resellers)
+    listings_raw = None
+    listings = {"count": 0, "lowest_price": None, "top_5": []}
+    try:
+        listings_raw = get_resellers(asset_id)
+        listings = summarize_resellers(listings_raw)
+    except HTTPException as e:
+        market_notes.append(f"Resellers unavailable (status {e.status_code}).")
+
+    scorecard = trader_scorecard(market, listings)
+
     response = {
         "source": "roblox-only:full-analysis",
         "catalog_url": catalog_url,
@@ -472,11 +575,13 @@ def analyze_item_from_catalog_link(
         "collectible_item_id": collectible_item_id,
         "roblox": roblox,
         "market": market,
+        "listings": listings,
+        "trader": scorecard,
         "analysis": {
             "notes": [
                 "Roblox catalog details fetched successfully.",
                 *market_notes,
-                "Raw resale datasets are omitted by default to avoid large responses.",
+                "Market stats computed from resale history; listings from resellers snapshot.",
             ],
         },
     }
@@ -484,6 +589,7 @@ def analyze_item_from_catalog_link(
     if include_raw:
         response["resale_data"] = resale_data
         response["resale_history"] = resale_history
+        response["resellers_raw"] = listings_raw
 
     return response
 
