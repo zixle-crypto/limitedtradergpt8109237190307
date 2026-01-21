@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import math
 import re
-from typing import Any, Dict, Optional, List
-from statistics import median
+import sqlite3
+import time
+from collections import defaultdict
+from typing import Any, Dict, Optional, List, Tuple
 
 import requests
 from fastapi import FastAPI, HTTPException, Query, Body
@@ -22,6 +26,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def on_startup():
+    db_init()
+    asyncio.create_task(hot_refresher_loop())
+
 # -------------------------
 # Config
 # -------------------------
@@ -36,7 +45,28 @@ ROBLOX_MARKETPLACE_SALES_RESALE_DATA = "https://apis.roblox.com/marketplace-sale
 ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-history"
 ROBLOX_RESELLERS_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resellers"
 
-DEFAULT_HISTORY_POINTS = 60   # last 60 points (safe)
+DB_PATH = "market_cache.sqlite3"
+
+# Cache behavior
+CACHE_TTL_SECONDS = 120          # consider cached "fresh" for 2 minutes
+HOT_REFRESH_SECONDS = 10         # refresh hot items every 10 seconds
+MAX_REFRESH_PER_CYCLE = 8        # safety cap (prevents spam)
+SLEEP_TICK_SECONDS = 1           # background loop tick
+
+# In-memory cache:
+# key -> {"updated_at": float, "payload": dict}
+CACHE: Dict[str, Dict] = {}
+
+# Hot items tracking (requested recently)
+# key -> last requested time, request count
+HOT_LAST_SEEN: Dict[str, float] = {}
+HOT_COUNT: defaultdict[str, int] = defaultdict(int)
+
+# Simple global limiter
+LAST_UPSTREAM_CALL_AT = 0.0
+MIN_SECONDS_BETWEEN_UPSTREAM_CALLS = 0.2  # 5 req/sec max overall
+
+DEFAULT_HISTORY_POINTS = 60
 MAX_HISTORY_POINTS = 200      # hard cap to avoid huge payloads
 
 session = requests.Session()
@@ -48,6 +78,75 @@ session.headers.update({"User-Agent": "RoliBridge/1.0"})
 # -------------------------
 def api_error(status: int, code: str, message: str, details: Any = None):
     raise HTTPException(status_code=status, detail={"code": code, "message": message, "details": details})
+
+
+def db_init():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+      CREATE TABLE IF NOT EXISTS item_cache (
+        cache_key TEXT PRIMARY KEY,
+        updated_at REAL NOT NULL,
+        payload TEXT NOT NULL
+      )
+    """)
+    con.commit()
+    con.close()
+
+def db_get(cache_key: str):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT updated_at, payload FROM item_cache WHERE cache_key=?", (cache_key,))
+    row = cur.fetchone()
+    con.close()
+    if not row:
+        return None
+    updated_at, payload = row
+    return {"updated_at": float(updated_at), "payload": json.loads(payload)}
+
+def db_put(cache_key: str, payload: dict):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT OR REPLACE INTO item_cache(cache_key, updated_at, payload) VALUES(?, ?, ?)",
+        (cache_key, time.time(), json.dumps(payload)),
+    )
+    con.commit()
+    con.close()
+
+def cache_key_for_asset(asset_id: int) -> str:
+    return f"item:{asset_id}"
+
+def cache_get(cache_key: str):
+    # memory first
+    if cache_key in CACHE:
+        return CACHE[cache_key]
+    # db fallback
+    row = db_get(cache_key)
+    if row:
+        CACHE[cache_key] = row
+        return row
+    return None
+
+def cache_put(cache_key: str, payload: dict):
+    row = {"updated_at": time.time(), "payload": payload}
+    CACHE[cache_key] = row
+    db_put(cache_key, payload)
+
+def is_fresh(updated_at: float) -> bool:
+    return (time.time() - updated_at) < CACHE_TTL_SECONDS
+
+def mark_hot(cache_key: str):
+    HOT_LAST_SEEN[cache_key] = time.time()
+    HOT_COUNT[cache_key] += 1
+
+async def _global_throttle():
+    global LAST_UPSTREAM_CALL_AT
+    now = time.time()
+    wait = (LAST_UPSTREAM_CALL_AT + MIN_SECONDS_BETWEEN_UPSTREAM_CALLS) - now
+    if wait > 0:
+        await asyncio.sleep(wait)
+    LAST_UPSTREAM_CALL_AT = time.time()
 
 
 def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -450,6 +549,102 @@ def _extract_asset_id(entry: Any) -> Optional[int]:
     return None
 
 
+def build_compact_item_payload(asset_id: int, history_points: int = 120) -> dict:
+    roblox = get_catalog_details(asset_id)
+    collectible_item_id = _extract_collectible_item_id(roblox)
+
+    market_notes = []
+    resale_data = {}
+    resale_history = {"data": []}
+
+    # Resellers snapshot (best for traders)
+    listings = {"count": 0, "lowest_price": None, "top_5": []}
+    try:
+        resellers_raw = get_resellers(asset_id, limit=30)
+        listings = summarize_resellers(resellers_raw)
+    except HTTPException as e:
+        market_notes.append(f"Resellers unavailable (status {e.status_code}).")
+
+    # Resale data/history (may 404; don't fail)
+    try:
+        resale_data = get_resale_data_dual(asset_id, collectible_item_id)
+    except HTTPException as e:
+        market_notes.append(f"Resale-data unavailable (status {e.status_code}).")
+
+    try:
+        full_history = get_resale_history_dual(asset_id, collectible_item_id)
+        # truncate to avoid ResponseTooLarge
+        if isinstance(full_history, dict) and isinstance(full_history.get("data"), list):
+            data = full_history["data"]
+            if len(data) > history_points:
+                full_history = {**full_history, "data": data[-history_points:], "truncated": True}
+        resale_history = full_history if isinstance(full_history, dict) else {"data": []}
+    except HTTPException as e:
+        market_notes.append(f"Resale-history unavailable (status {e.status_code}).")
+
+    market = compute_market_stats(resale_data or {}, resale_history or {"data": []})
+
+    # Trader scorecard
+    trader = None
+    try:
+        trader = trader_scorecard(market, listings)
+    except Exception:
+        trader = None
+
+    return {
+        "source": "roblox-only:full-analysis",
+        "asset_id": asset_id,
+        "collectible_item_id": collectible_item_id,
+        "roblox": roblox,
+        "market": market,
+        "listings": listings,
+        "trader": trader,
+        "analysis": {
+            "notes": market_notes,
+            "generated_at": time.time(),
+        },
+    }
+
+async def hot_refresher_loop():
+    while True:
+        try:
+            # pick the hottest items (by request count)
+            keys = list(HOT_COUNT.keys())
+            keys.sort(key=lambda k: HOT_COUNT[k], reverse=True)
+
+            refreshed = 0
+            for key in keys:
+                if refreshed >= MAX_REFRESH_PER_CYCLE:
+                    break
+
+                # only refresh if seen recently (last 30 minutes)
+                last_seen = HOT_LAST_SEEN.get(key, 0.0)
+                if (time.time() - last_seen) > 1800:
+                    continue
+
+                row = cache_get(key)
+                if row and (time.time() - row["updated_at"]) < HOT_REFRESH_SECONDS:
+                    continue  # already fresh enough
+
+                # parse asset id
+                if not key.startswith("item:"):
+                    continue
+                asset_id = int(key.split(":", 1)[1])
+
+                # throttle upstream so we don't get rate-limited
+                await _global_throttle()
+
+                # refresh and store
+                payload = build_compact_item_payload(asset_id, history_points=120)
+                cache_put(key, payload)
+                refreshed += 1
+
+            await asyncio.sleep(SLEEP_TICK_SECONDS)
+        except Exception:
+            # never crash the loop
+            await asyncio.sleep(SLEEP_TICK_SECONDS)
+
+
 # -------------------------
 # Routes
 # -------------------------
@@ -512,86 +707,42 @@ def search_item_then_get_stats(q: str, limit: int = 5):
 @app.post("/market/item/analyze")
 def analyze_item_from_catalog_link(
     catalog_url: str = Body(..., embed=True),
-    include_raw: bool = Query(False),
-    history_points: int = Query(DEFAULT_HISTORY_POINTS, ge=0, le=MAX_HISTORY_POINTS),
+    force_refresh: bool = Query(False),
 ):
     asset_id_opt = _asset_id_from_catalog_url(catalog_url)
     if asset_id_opt is None:
         api_error(400, "INVALID_LINK", "Invalid catalog link")
     asset_id: int = asset_id_opt  # type: ignore
-    
-    roblox = get_catalog_details(asset_id)
-    collectible_item_id = _extract_collectible_item_id(roblox)
 
-    resale_data = None
-    resale_history = None
-    market_notes = []
+    key = cache_key_for_asset(asset_id)
+    mark_hot(key)
 
-    try:
-        resale_data = get_resale_data_dual(asset_id, collectible_item_id)
-    except HTTPException as e:
-        market_notes.append(f"Resale-data unavailable (status {e.status_code}).")
+    row = cache_get(key)
 
-    try:
-        resale_history = get_resale_history_dual(asset_id, collectible_item_id)
-    except HTTPException as e:
-        market_notes.append(f"Resale-history unavailable (status {e.status_code}).")
+    # Return cached immediately if fresh and not forcing refresh
+    if row and is_fresh(row["updated_at"]) and not force_refresh:
+        payload = row["payload"]
+        payload["cache"] = {"hit": True, "fresh": True, "updated_at": row["updated_at"]}
+        payload["catalog_url"] = catalog_url
+        return payload
 
-    market = {
-        "fmv": None,
-        "rap_like": None,
-        "demand": "Unknown",
-        "trend": "Unknown",
-        "projected": False,
-        "history_points_used": 0,
-    }
+    # If we have stale cache, return it (stale-while-revalidate style)
+    # and let background refresh catch up
+    if row and not force_refresh:
+        payload = row["payload"]
+        payload["cache"] = {"hit": True, "fresh": False, "updated_at": row["updated_at"]}
+        payload["catalog_url"] = catalog_url
+        payload.setdefault("analysis", {}).setdefault("notes", []).append(
+            "Returned cached data (stale). Background refresh scheduled."
+        )
+        return payload
 
-    if resale_history and isinstance(resale_history, dict) and isinstance(resale_history.get("data"), list):
-        points = resale_history["data"]
-        if history_points == 0:
-            used = []
-        else:
-            used = points[-history_points:] if len(points) > history_points else points
-
-        market = compute_market_stats(resale_data or {}, {"data": used})
-        market["history_points_used"] = len(used)
-        resale_history = _truncate_history(resale_history, history_points)
-
-    # Listings snapshot (resellers)
-    listings_raw = None
-    listings = {"count": 0, "lowest_price": None, "top_5": []}
-    try:
-        listings_raw = get_resellers(asset_id)
-        listings = summarize_resellers(listings_raw)
-    except HTTPException as e:
-        market_notes.append(f"Resellers unavailable (status {e.status_code}).")
-
-    scorecard = trader_scorecard(market, listings)
-
-    response = {
-        "source": "roblox-only:full-analysis",
-        "catalog_url": catalog_url,
-        "asset_id": asset_id,
-        "collectible_item_id": collectible_item_id,
-        "roblox": roblox,
-        "market": market,
-        "listings": listings,
-        "trader": scorecard,
-        "analysis": {
-            "notes": [
-                "Roblox catalog details fetched successfully.",
-                *market_notes,
-                "Market stats computed from resale history; listings from resellers snapshot.",
-            ],
-        },
-    }
-
-    if include_raw:
-        response["resale_data"] = resale_data
-        response["resale_history"] = resale_history
-        response["resellers_raw"] = listings_raw
-
-    return response
+    # Force refresh: compute now (may be slower)
+    payload = build_compact_item_payload(asset_id, history_points=120)
+    cache_put(key, payload)
+    payload["cache"] = {"hit": False, "fresh": True, "updated_at": time.time()}
+    payload["catalog_url"] = catalog_url
+    return payload
 
 
 @app.get("/market/player/{username}")
