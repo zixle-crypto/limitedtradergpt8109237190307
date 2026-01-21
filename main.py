@@ -45,12 +45,14 @@ ROBLOX_MARKETPLACE_SALES_RESALE_DATA = "https://apis.roblox.com/marketplace-sale
 ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-history"
 ROBLOX_RESELLERS_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resellers"
 
+from urllib.parse import urlparse
+
 DB_PATH = "market_cache.sqlite3"
 
 # Cache behavior
 CACHE_TTL_SECONDS = 120          # consider cached "fresh" for 2 minutes
-HOT_REFRESH_SECONDS = 10         # refresh hot items every 10 seconds
-MAX_REFRESH_PER_CYCLE = 8        # safety cap (prevents spam)
+HOT_REFRESH_SECONDS = 30         # refresh hot items every 30 seconds
+MAX_REFRESH_PER_CYCLE = 2        # safety cap (prevents spam)
 SLEEP_TICK_SECONDS = 1           # background loop tick
 
 # In-memory cache:
@@ -64,7 +66,7 @@ HOT_COUNT: defaultdict[str, int] = defaultdict(int)
 
 # Simple global limiter
 LAST_UPSTREAM_CALL_AT = 0.0
-MIN_SECONDS_BETWEEN_UPSTREAM_CALLS = 0.2  # 5 req/sec max overall
+MIN_SECONDS_BETWEEN_UPSTREAM_CALLS = 0.6  # approx 1.6 req/sec
 
 DEFAULT_HISTORY_POINTS = 60
 MAX_HISTORY_POINTS = 200      # hard cap to avoid huge payloads
@@ -149,20 +151,61 @@ async def _global_throttle():
     LAST_UPSTREAM_CALL_AT = time.time()
 
 
+def _host(url: str) -> str:
+    try:
+        return urlparse(url).netloc
+    except Exception:
+        return "unknown"
+
+
 def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     try:
         r = session.get(url, params=params, timeout=TIMEOUT_S)
-        if r.status_code == 429:
-            api_error(429, "RATE_LIMITED", "Rate limited by upstream API")
-        if r.status_code >= 400:
-            api_error(502, "UPSTREAM_ERROR", f"Upstream error {r.status_code}: {r.text[:300]}")
-        try:
-            return r.json()
-        except Exception:
-            api_error(502, "UPSTREAM_NON_JSON", "Upstream returned non-JSON")
     except requests.RequestException as e:
-        api_error(502, "UPSTREAM_REQUEST_FAILED", f"Upstream request failed: {e}")
-    return {}
+        raise HTTPException(status_code=502, detail={
+            "code": "UPSTREAM_CONNECT_ERROR",
+            "message": "Upstream request failed",
+            "details": {"upstream": _host(url), "error": str(e)},
+        })
+
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail={
+            "code": "UPSTREAM_HTTP_ERROR",
+            "message": "Upstream returned an error",
+            "details": {
+                "upstream": _host(url),
+                "status": r.status_code,
+                "body": r.text[:300],
+                "url": url,
+            },
+        })
+
+    try:
+        return r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail={
+            "code": "UPSTREAM_NON_JSON",
+            "message": "Upstream returned non-JSON",
+            "details": {"upstream": _host(url), "url": url},
+        })
+
+
+def _get_json_with_retry(url: str, params=None, retries: int = 3) -> Dict[str, Any]:
+    import random
+    last_err = None
+    for i in range(retries):
+        try:
+            return _http_get_json(url, params=params)
+        except HTTPException as e:
+            last_err = e
+            detail = e.detail if isinstance(e.detail, dict) else {}
+            status = (detail.get("details") or {}).get("status")
+            # retry only if upstream is 429 or 5xx
+            if status in (429, 500, 502, 503, 504):
+                time.sleep((0.4 * (2 ** i)) + random.random() * 0.2)
+                continue
+            break
+    raise last_err  # type: ignore
 
 
 def _http_post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,21 +294,24 @@ def _truncate_history(history: Dict[str, Any], limit: int) -> Dict[str, Any]:
 
 
 def get_resale_data_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
-    # Prefer collectible system if available
     if collectible_item_id:
-        return _http_get_json(ROBLOX_MARKETPLACE_SALES_RESALE_DATA.format(collectible_item_id=collectible_item_id))
-    return _http_get_json(ROBLOX_RESALE_DATA_URL.format(asset_id=asset_id))
+        url = ROBLOX_MARKETPLACE_SALES_RESALE_DATA.format(collectible_item_id=collectible_item_id)
+        return _get_json_with_retry(url)
+    url = ROBLOX_RESALE_DATA_URL.format(asset_id=asset_id)
+    return _get_json_with_retry(url)
 
 
 def get_resale_history_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
     if collectible_item_id:
-        return _http_get_json(ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY.format(collectible_item_id=collectible_item_id))
-    return _http_get_json(ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id))
+        url = ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY.format(collectible_item_id=collectible_item_id)
+        return _get_json_with_retry(url)
+    url = ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id)
+    return _get_json_with_retry(url)
 
 
 def get_resellers(asset_id: int, limit: int = 30) -> Dict[str, Any]:
-    # limit is supported on some variants; safe to pass
-    return _http_get_json(ROBLOX_RESELLERS_URL.format(asset_id=asset_id), params={"limit": min(max(limit, 1), 100)})
+    url = ROBLOX_RESELLERS_URL.format(asset_id=asset_id)
+    return _get_json_with_retry(url, params={"limit": min(max(limit, 1), 100)})
 
 
 def summarize_resellers(resellers_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -550,6 +596,10 @@ def _extract_asset_id(entry: Any) -> Optional[int]:
 
 
 def build_compact_item_payload(asset_id: int, history_points: int = 120) -> dict:
+    key = cache_key_for_asset(asset_id)
+    prev = cache_get(key)
+    prev_payload = prev["payload"] if prev else None
+
     roblox = get_catalog_details(asset_id)
     collectible_item_id = _extract_collectible_item_id(roblox)
 
@@ -582,7 +632,20 @@ def build_compact_item_payload(asset_id: int, history_points: int = 120) -> dict
     except HTTPException as e:
         market_notes.append(f"Resale-history unavailable (status {e.status_code}).")
 
-    market = compute_market_stats(resale_data or {}, resale_history or {"data": []})
+    market = None
+    try:
+        market = compute_market_stats(resale_data or {}, resale_history or {"data": []})
+    except Exception:
+        market = None
+
+    # Fallback to previous cached market if fresh compute failed
+    if market is None and prev_payload and isinstance(prev_payload.get("market"), dict):
+        market = prev_payload["market"]
+        market_notes.append("Live market refresh failed; using last cached market snapshot.")
+
+    if market is None:
+        market = {"fmv": None, "rap_like": None, "demand": "Unknown", "trend": "Unknown", "projected": False}
+        market_notes.append("No cached market snapshot available yet.")
 
     # Trader scorecard
     trader = None

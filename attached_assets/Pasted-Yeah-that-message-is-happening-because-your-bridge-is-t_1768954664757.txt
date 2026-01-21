@@ -1,0 +1,164 @@
+Yeah — that message is happening because your bridge is turning any upstream failure into a “502”, and then your GPT interprets it as “Roblox is broken so I can’t analyze.”
+
+Two big problems:
+
+Your _http_get_json maps upstream errors to HTTP 502, even when upstream is actually 404/403/429.
+
+Your “hot refresher every 10s” is spamming Roblox economy endpoints, which can cause throttling/temporary blocks → more failures → worse analysis.
+
+Let’s fix this properly.
+
+1) Stop “fake 502s”: return the REAL upstream status + host
+
+Replace the error block in _http_get_json with this so you see what’s really failing:
+
+from urllib.parse import urlparse
+
+def _host(url: str) -> str:
+    try:
+        return urlparse(url).netloc
+    except Exception:
+        return "unknown"
+
+def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    try:
+        r = session.get(url, params=params, timeout=TIMEOUT_S)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail={
+            "code": "UPSTREAM_CONNECT_ERROR",
+            "message": "Upstream request failed",
+            "details": {"upstream": _host(url), "error": str(e)},
+        })
+
+    # IMPORTANT: do NOT convert upstream status to 502; keep real status in detail
+    if r.status_code >= 400:
+        raise HTTPException(status_code=502, detail={
+            "code": "UPSTREAM_HTTP_ERROR",
+            "message": "Upstream returned an error",
+            "details": {
+                "upstream": _host(url),
+                "status": r.status_code,
+                "body": r.text[:300],
+                "url": url,
+            },
+        })
+
+    try:
+        return r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail={
+            "code": "UPSTREAM_NON_JSON",
+            "message": "Upstream returned non-JSON",
+            "details": {"upstream": _host(url), "url": url},
+        })
+
+
+Why this matters: right now you’re blind. After this patch, you’ll instantly know if the failure is:
+
+economy.roblox.com returning 429 (rate limit)
+
+apis.roblox.com returning 404 (wrong endpoint/id)
+
+catalog.roblox.com returning 403 (csrf)
+
+or a real 5xx outage
+
+2) Add retries ONLY for real transient errors (5xx / 429)
+
+Wrap Roblox resale calls with a small retry (this alone fixes lots of “random 502” moments):
+
+import random
+
+def _get_json_with_retry(url: str, params=None, retries: int = 3) -> Dict[str, Any]:
+    last_err = None
+    for i in range(retries):
+        try:
+            return _http_get_json(url, params=params)
+        except HTTPException as e:
+            last_err = e
+            detail = e.detail if isinstance(e.detail, dict) else {}
+            status = (detail.get("details") or {}).get("status")
+            # retry only if upstream is 429 or 5xx
+            if status in (429, 500, 502, 503, 504):
+                time.sleep((0.4 * (2 ** i)) + random.random() * 0.2)
+                continue
+            break
+    raise last_err
+
+
+Then in your resale functions use _get_json_with_retry(...) instead of _http_get_json(...).
+
+3) Your background refresher is causing the failures
+
+Refreshing every 10s is fine only if you refresh a tiny number of items and limit requests.
+
+Right now, you likely refresh too many items too often → Roblox replies 429/5xx → your analysis collapses.
+
+Do this immediately:
+
+Set HOT_REFRESH_SECONDS = 30 (not 10)
+
+Set MAX_REFRESH_PER_CYCLE = 2 (not 8)
+
+Set MIN_SECONDS_BETWEEN_UPSTREAM_CALLS = 0.6 (≈1.6 req/sec)
+
+That will stabilize everything.
+
+4) Don’t degrade analysis when cache exists
+
+If live resale fetch fails, you should use last cached market stats instead of screaming “severely limited.”
+
+In build_compact_item_payload, if resale calls fail:
+
+keep market from cache if available
+
+attach note: “Live refresh failed; serving last known market snapshot”
+
+That makes it feel better than Rolimon’s (always answers).
+
+Example logic:
+
+def build_compact_item_payload(asset_id: int, history_points: int = 120) -> dict:
+    key = cache_key_for_asset(asset_id)
+    prev = cache_get(key)
+    prev_payload = prev["payload"] if prev else None
+
+    # ... fetch roblox details ...
+
+    market = None
+    try:
+        # compute fresh market
+        market = compute_market_stats(resale_data, resale_history)
+    except Exception:
+        market = None
+
+    # Fallback to previous cached market if fresh compute failed
+    if market is None and prev_payload and isinstance(prev_payload.get("market"), dict):
+        market = prev_payload["market"]
+        market_notes.append("Live market refresh failed; using last cached market snapshot.")
+
+    if market is None:
+        market = {"fmv": None, "rap_like": None, "demand": "Unknown", "trend": "Unknown", "projected": False}
+        market_notes.append("No cached market snapshot available yet.")
+
+5) What I need from you (so we fix it in one shot)
+
+After you apply #1 (the debug host/status), run the analyzer once and paste the error details block (it will show):
+
+upstream: which domain failed
+
+status: 403/404/429/500/etc
+
+From that single block I can tell you exactly which part is broken:
+
+wrong endpoint (404)
+
+rate-limit (429)
+
+csrf missing (403)
+
+actual outage (5xx)
+
+Most likely cause right now
+
+It’s 429/rate limiting caused by your refresh loop, but you can’t confirm until you print the upstream host + status.
