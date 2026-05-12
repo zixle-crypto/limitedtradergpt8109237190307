@@ -1,22 +1,8 @@
-from __future__ import annotations
-
-import asyncio
-import json
-import math
-import re
-import sqlite3
-import time
-from collections import defaultdict
-from typing import Any, Dict, Optional, List, Tuple
-
-import requests
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
-# -------------------------
-# App
-# -------------------------
-app = FastAPI(title="Roli Bridge (OG Routes)", version="1.0.0")
+app = FastAPI(title="Zixle Studios", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,846 +12,280 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.on_event("startup")
-async def on_startup():
-    db_init()
-    asyncio.create_task(hot_refresher_loop())
-
-# -------------------------
-# Config
-# -------------------------
-TIMEOUT_S = 15
-
-ROBLOX_USERNAME_TO_ID_URL = "https://users.roblox.com/v1/usernames/users"
-ROBLOX_CATALOG_DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details"
-ROBLOX_CATALOG_SEARCH_URL = "https://catalog.roblox.com/v1/search/items"
-ROBLOX_RESALE_DATA_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-data"
-ROBLOX_RESALE_HISTORY_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resale-history"
-ROBLOX_MARKETPLACE_SALES_RESALE_DATA = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-data"
-ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY = "https://apis.roblox.com/marketplace-sales/v1/item/{collectible_item_id}/resale-history"
-ROBLOX_RESELLERS_URL = "https://economy.roblox.com/v1/assets/{asset_id}/resellers"
-
-from urllib.parse import urlparse
-
-DB_PATH = "market_cache.sqlite3"
-
-# Cache behavior
-CACHE_TTL_SECONDS = 120          # consider cached "fresh" for 2 minutes
-HOT_REFRESH_SECONDS = 30         # refresh hot items every 30 seconds
-MAX_REFRESH_PER_CYCLE = 2        # safety cap (prevents spam)
-SLEEP_TICK_SECONDS = 1           # background loop tick
-
-# In-memory cache:
-# key -> {"updated_at": float, "payload": dict}
-CACHE: Dict[str, Dict] = {}
-
-# Hot items tracking (requested recently)
-# key -> last requested time, request count
-HOT_LAST_SEEN: Dict[str, float] = {}
-HOT_COUNT: defaultdict[str, int] = defaultdict(int)
-
-# Simple global limiter
-LAST_UPSTREAM_CALL_AT = 0.0
-MIN_SECONDS_BETWEEN_UPSTREAM_CALLS = 0.6  # approx 1.6 req/sec
-
-DEFAULT_HISTORY_POINTS = 60
-MAX_HISTORY_POINTS = 200      # hard cap to avoid huge payloads
-
-session = requests.Session()
-session.headers.update({"User-Agent": "RoliBridge/1.0"})
-
-
-# -------------------------
-# Helpers
-# -------------------------
-def api_error(status: int, code: str, message: str, details: Any = None):
-    raise HTTPException(status_code=status, detail={"code": code, "message": message, "details": details})
-
-
-def db_init():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("""
-      CREATE TABLE IF NOT EXISTS item_cache (
-        cache_key TEXT PRIMARY KEY,
-        updated_at REAL NOT NULL,
-        payload TEXT NOT NULL
-      )
-    """)
-    con.commit()
-    con.close()
-
-def db_get(cache_key: str):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT updated_at, payload FROM item_cache WHERE cache_key=?", (cache_key,))
-    row = cur.fetchone()
-    con.close()
-    if not row:
-        return None
-    updated_at, payload = row
-    return {"updated_at": float(updated_at), "payload": json.loads(payload)}
-
-def db_put(cache_key: str, payload: dict):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO item_cache(cache_key, updated_at, payload) VALUES(?, ?, ?)",
-        (cache_key, time.time(), json.dumps(payload)),
-    )
-    con.commit()
-    con.close()
-
-def cache_key_for_asset(asset_id: int) -> str:
-    return f"item:{asset_id}"
-
-def cache_get(cache_key: str):
-    # memory first
-    if cache_key in CACHE:
-        return CACHE[cache_key]
-    # db fallback
-    row = db_get(cache_key)
-    if row:
-        CACHE[cache_key] = row
-        return row
-    return None
-
-def cache_put(cache_key: str, payload: dict):
-    row = {"updated_at": time.time(), "payload": payload}
-    CACHE[cache_key] = row
-    db_put(cache_key, payload)
-
-def is_fresh(updated_at: float) -> bool:
-    return (time.time() - updated_at) < CACHE_TTL_SECONDS
-
-def mark_hot(cache_key: str):
-    HOT_LAST_SEEN[cache_key] = time.time()
-    HOT_COUNT[cache_key] += 1
-
-async def _global_throttle():
-    global LAST_UPSTREAM_CALL_AT
-    now = time.time()
-    wait = (LAST_UPSTREAM_CALL_AT + MIN_SECONDS_BETWEEN_UPSTREAM_CALLS) - now
-    if wait > 0:
-        await asyncio.sleep(wait)
-    LAST_UPSTREAM_CALL_AT = time.time()
-
-
-def _host(url: str) -> str:
-    try:
-        return urlparse(url).netloc
-    except Exception:
-        return "unknown"
-
-
-def _http_get_json(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    try:
-        r = session.get(url, params=params, timeout=TIMEOUT_S)
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail={
-            "code": "UPSTREAM_CONNECT_ERROR",
-            "message": "Upstream request failed",
-            "details": {"upstream": _host(url), "error": str(e)},
-        })
-
-    if r.status_code >= 400:
-        raise HTTPException(status_code=502, detail={
-            "code": "UPSTREAM_HTTP_ERROR",
-            "message": "Upstream returned an error",
-            "details": {
-                "upstream": _host(url),
-                "status": r.status_code,
-                "body": r.text[:300],
-                "url": url,
-            },
-        })
-
-    try:
-        return r.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail={
-            "code": "UPSTREAM_NON_JSON",
-            "message": "Upstream returned non-JSON",
-            "details": {"upstream": _host(url), "url": url},
-        })
-
-
-def _get_json_with_retry(url: str, params=None, retries: int = 3) -> Dict[str, Any]:
-    import random
-    last_err = None
-    for i in range(retries):
-        try:
-            return _http_get_json(url, params=params)
-        except HTTPException as e:
-            last_err = e
-            detail = e.detail if isinstance(e.detail, dict) else {}
-            status = (detail.get("details") or {}).get("status")
-            # retry only if upstream is 429 or 5xx
-            if status in (429, 500, 502, 503, 504):
-                time.sleep((0.4 * (2 ** i)) + random.random() * 0.2)
-                continue
-            break
-    raise last_err  # type: ignore
-
-
-def _http_post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    try:
-        # First attempt
-        r = session.post(url, json=payload, timeout=TIMEOUT_S)
-        
-        # If we get 403 and there's an X-CSRF-TOKEN header, retry with the token
-        if r.status_code == 403 and 'x-csrf-token' in r.headers:
-            csrf_token = r.headers['x-csrf-token']
-            session.headers.update({'X-CSRF-TOKEN': csrf_token})
-            # Retry the request with the token
-            r = session.post(url, json=payload, timeout=TIMEOUT_S)
-            
-        if r.status_code == 429:
-            api_error(429, "RATE_LIMITED", "Rate limited by upstream API")
-        if r.status_code >= 400:
-            api_error(502, "UPSTREAM_ERROR", f"Upstream error {r.status_code}: {r.text[:300]}")
-        try:
-            return r.json()
-        except Exception:
-            api_error(502, "UPSTREAM_NON_JSON", "Upstream returned non-JSON")
-    except requests.RequestException as e:
-        api_error(502, "UPSTREAM_REQUEST_FAILED", f"Upstream request failed: {e}")
-    return {}
-
-
-def _username_to_user_id(username: str) -> int:
-    payload = {
-        "usernames": [username],
-        "excludeBannedUsers": False,
+HOME_HTML = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zixle Studios | Roblox Game Development</title>
+  <meta name="description" content="Zixle Studios builds Roblox games, access systems, marketplace merch flows, game UI, economy tools, and launch-ready prototypes." />
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07100f;
+      --panel: rgba(15, 31, 29, 0.78);
+      --panel-strong: rgba(18, 37, 35, 0.94);
+      --text: #f4fffb;
+      --muted: #a7bdb8;
+      --line: rgba(145, 226, 209, 0.2);
+      --teal: #5ce6ca;
+      --amber: #ffbd62;
+      --blue: #72a7ff;
     }
-    data = _http_post_json(ROBLOX_USERNAME_TO_ID_URL, payload)
-    data_list = data.get("data")
-    if not isinstance(data_list, list) or not data_list:
-        api_error(404, "USERNAME_NOT_FOUND", "Roblox username not found")
-    
-    first_entry = data_list[0]
-    if not isinstance(first_entry, dict) or "id" not in first_entry:
-        api_error(404, "USERNAME_NOT_FOUND", "Roblox username not found")
-        
-    return int(first_entry["id"])
-
-
-def get_catalog_details(asset_id: int) -> Dict[str, Any]:
-    payload = {"items": [{"itemType": "Asset", "id": asset_id}]}
-    data = _http_post_json(ROBLOX_CATALOG_DETAILS_URL, payload)
-    data_list = data.get("data")
-    if not isinstance(data_list, list) or not data_list:
-        api_error(404, "ASSET_NOT_FOUND", "Asset not found on Roblox")
-    
-    first_item = data_list[0]
-    if not isinstance(first_item, dict):
-        api_error(404, "ASSET_NOT_FOUND", "Asset not found on Roblox")
-        
-    return first_item
-
-
-def _extract_collectible_item_id(roblox_details: Dict[str, Any]) -> Optional[str]:
-    # Common field names seen in the wild:
-    # - collectibleItemId
-    # - collectibleItemId in nested "collectible" object
-    for k in ("collectibleItemId", "collectible_item_id"):
-        v = roblox_details.get(k)
-        if v:
-            return str(v)
-
-    collectible = roblox_details.get("collectible")
-    if isinstance(collectible, dict):
-        v = collectible.get("collectibleItemId") or collectible.get("id")
-        if v:
-            return str(v)
-
-    return None
-
-
-def _truncate_history(history: Dict[str, Any], limit: int) -> Dict[str, Any]:
-    if not isinstance(history, dict):
-        return history
-    data = history.get("data")
-    if isinstance(data, list) and len(data) > limit:
-        return {**history, "data": data[-limit:], "truncated": True, "returned_points": limit, "total_points": len(data)}
-    if isinstance(data, list):
-        return {**history, "truncated": False, "returned_points": len(data), "total_points": len(data)}
-    return history
-
-
-def get_resale_data_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
-    if collectible_item_id:
-        url = ROBLOX_MARKETPLACE_SALES_RESALE_DATA.format(collectible_item_id=collectible_item_id)
-        return _get_json_with_retry(url)
-    url = ROBLOX_RESALE_DATA_URL.format(asset_id=asset_id)
-    return _get_json_with_retry(url)
-
-
-def get_resale_history_dual(asset_id: int, collectible_item_id: Optional[str]) -> Dict[str, Any]:
-    if collectible_item_id:
-        url = ROBLOX_MARKETPLACE_SALES_RESALE_HISTORY.format(collectible_item_id=collectible_item_id)
-        return _get_json_with_retry(url)
-    url = ROBLOX_RESALE_HISTORY_URL.format(asset_id=asset_id)
-    return _get_json_with_retry(url)
-
-
-def get_resellers(asset_id: int, limit: int = 30) -> Dict[str, Any]:
-    url = ROBLOX_RESELLERS_URL.format(asset_id=asset_id)
-    return _get_json_with_retry(url, params={"limit": min(max(limit, 1), 100)})
-
-
-def summarize_resellers(resellers_payload: Dict[str, Any]) -> Dict[str, Any]:
-    data = resellers_payload.get("data")
-    if not isinstance(data, list) or not data:
-        return {"count": 0, "lowest_price": None, "top_5": []}
-
-    # entries often look like {"price":935,"seller":{...},"serialNumber":...}
-    prices = []
-    top = []
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        p = row.get("price")
-        if isinstance(p, (int, float)) and p > 0:
-            prices.append(int(p))
-            if len(top) < 5:
-                top.append({"price": int(p), "serialNumber": row.get("serialNumber")})
-    prices.sort()
-    return {"count": len(prices), "lowest_price": prices[0] if prices else None, "top_5": top}
-
-
-def _extract_prices_from_history(history: Dict[str, Any]) -> List[float]:
-    """
-    Roblox resale-history formats vary. We try multiple keys safely.
-    Expected: {"data":[{"date":"...","value":123}, ...]} or {"data":[{"price":...}, ...]}
-    """
-    out: List[float] = []
-    data = history.get("data")
-    if not isinstance(data, list):
-        return out
-
-    for p in data:
-        if not isinstance(p, dict):
-            continue
-
-        # common keys
-        for k in ("price", "value", "avgPrice", "averagePrice", "mean", "rap"):
-            v = p.get(k)
-            if isinstance(v, (int, float)) and v > 0:
-                out.append(float(v))
-                break
-
-    return out
-
-
-def _trim_outliers(prices: List[float], lower_q: float = 0.05, upper_q: float = 0.95) -> List[float]:
-    if len(prices) < 20:
-        return prices[:]  # too few points; don't trim
-    s = sorted(prices)
-    lo = int(len(s) * lower_q)
-    hi = int(len(s) * upper_q)
-    hi = max(hi, lo + 1)
-    return s[lo:hi]
-
-
-def _ema(values: List[float], alpha: float) -> float:
-    if not values:
-        return float("nan")
-    ema = values[0]
-    for v in values[1:]:
-        ema = alpha * v + (1 - alpha) * ema
-    return ema
-
-
-def compute_market_stats(resale_data: Dict[str, Any], resale_history: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Produces a professional, explainable market summary from Roblox-only resale data.
-    """
-    raw_prices = _extract_prices_from_history(resale_history)
-    points = len(raw_prices)
-
-    # Pull best price / lowest price if available
-    best_price = resale_data.get("lowestPrice") or resale_data.get("bestPrice") or resale_data.get("price")
-    if not isinstance(best_price, (int, float)) or best_price <= 0:
-        best_price = None
-
-    # If no history, still return a useful analysis object
-    if points == 0:
-        return {
-            "fmv": None,
-            "rap_like": None,
-            "best_price": best_price,
-            "spread": None,
-            "volatility": None,
-            "demand": "Unknown",
-            "trend": "Unknown",
-            "momentum": "Unknown",
-            "projected": False,
-            "confidence": 0,
-            "history_points_used": 0,
-            "notes": [
-                "No usable resale-history price points were returned by Roblox for the selected window.",
-                "If this item is resellable, try increasing history_points or ensure the collectible resale endpoint is used.",
-            ],
-        }
-
-    # Clean + compute
-    trimmed = _trim_outliers(raw_prices)
-    trimmed_points = len(trimmed)
-
-    # FMV = median of trimmed points (robust)
-    fmv = int(round(median(trimmed)))
-
-    # RAP-like = mean of trimmed points
-    rap_like = int(round(sum(trimmed) / trimmed_points))
-
-    # Volatility = std/mean (coefficient of variation)
-    mean = sum(trimmed) / trimmed_points
-    var = sum((x - mean) ** 2 for x in trimmed) / max(trimmed_points - 1, 1)
-    std = math.sqrt(var)
-    volatility = float(std / mean) if mean > 0 else None
-
-    # Trend & momentum: compare short EMA vs long EMA using chronological order
-    # Use raw_prices order as provided (assumed chronological); if reversed it still gives a consistent signal.
-    short = _ema(raw_prices[-min(14, points):], alpha=0.35)  # recent
-    long = _ema(raw_prices[-min(60, points):], alpha=0.12)   # broader
-    if math.isnan(short) or math.isnan(long):
-        trend = "Unknown"
-        momentum = "Unknown"
-    else:
-        if short > long * 1.03:
-            trend = "Rising"
-            momentum = "Bullish"
-        elif short < long * 0.97:
-            trend = "Falling"
-            momentum = "Bearish"
-        else:
-            trend = "Sideways"
-            momentum = "Neutral"
-
-    # Demand proxy: points count in window
-    if points >= 50:
-        demand = "High"
-    elif points >= 15:
-        demand = "Medium"
-    else:
-        demand = "Low"
-
-    # Projected heuristic: sharp spike + low volume OR high volatility
-    projected = False
-    if points < 10:
-        # small sample: if last price is far above median, flag
-        if raw_prices[-1] > fmv * 1.35:
-            projected = True
-    else:
-        if raw_prices[-1] > fmv * 1.4 and demand in ("Low", "Medium"):
-            projected = True
-        if volatility is not None and volatility > 0.25 and demand == "Low":
-            projected = True
-
-    # Spread: difference between best price and FMV
-    spread = None
-    if best_price is not None:
-        spread = int(round(best_price - fmv))
-
-    # Confidence: based on sample size, trimmed points, and volatility
-    conf = 0
-    conf += min(points, 80) / 80 * 60  # up to 60
-    if volatility is not None:
-        conf += max(0, 20 - (volatility * 40))  # penalize volatility
-    conf += 20 if best_price is not None else 0
-    confidence = int(max(0, min(100, round(conf))))
-
-    notes = []
-    if trimmed_points != points:
-        notes.append(f"Outliers trimmed: used {trimmed_points}/{points} points for robust FMV.")
-    if best_price is None:
-        notes.append("Best/lowest price not available from resale-data endpoint.")
-    if points < 10:
-        notes.append("Low sample size: demand/trend confidence reduced.")
-    if projected:
-        notes.append("Projected-risk flag: price behavior looks spiky relative to volume/volatility.")
-
-    return {
-        "fmv": fmv,
-        "rap_like": rap_like,
-        "best_price": best_price,
-        "spread": spread,
-        "volatility": None if volatility is None else round(volatility, 4),
-        "demand": demand,
-        "trend": trend,
-        "momentum": momentum,
-        "projected": projected,
-        "confidence": confidence,
-        "history_points_used": points,
-        "notes": notes,
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(92, 230, 202, 0.2), transparent 34rem),
+        radial-gradient(circle at 88% 12%, rgba(255, 189, 98, 0.14), transparent 32rem),
+        linear-gradient(180deg, #081311 0%, #07100f 48%, #0a1215 100%);
+      color: var(--text);
     }
-
-
-def trader_scorecard(market: Dict[str, Any], listings: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Returns flip-focused signals:
-    - liquidity score (0-100)
-    - spread opportunities
-    - entry/exit guidance
-    """
-    fmv = market.get("fmv")
-    rap_like = market.get("rap_like")
-    best = market.get("best_price")  # from resale-data
-    lowest = listings.get("lowest_price")
-
-    # Choose entry price
-    entry = lowest or best
-    metric = fmv or rap_like
-
-    if entry is None or metric is None:
-        return {
-            "flip_signal": "AVOID",
-            "liquidity_score": 10 if market.get("demand") == "Low" else 20,
-            "edge_percent": None,
-            "entry_price": entry,
-            "target_exit": None,
-            "reason": "Insufficient pricing signals (missing entry price or FMV/RAP-like)."
-        }
-
-    edge = (metric - entry) / entry * 100.0
-
-    # Liquidity score based on demand + history points
-    demand = market.get("demand")
-    pts = market.get("history_points_used") or 0
-    liq = 20
-    if demand == "High":
-        liq = 85
-    elif demand == "Medium":
-        liq = 60
-    elif demand == "Low":
-        liq = 35
-    else:
-        liq = 25
-
-    if pts < 10:
-        liq = max(10, liq - 20)
-
-    # Profit-minded verdict
-    if edge >= 10 and liq >= 50 and not market.get("projected", False):
-        flip = "FLIP"
-        target = int(round(entry * 1.12))
-    elif edge >= 5 and liq >= 40:
-        flip = "MAYBE"
-        target = int(round(entry * 1.08))
-    else:
-        flip = "AVOID"
-        target = int(round(entry * 1.05))
-
-    return {
-        "flip_signal": flip,
-        "liquidity_score": liq,
-        "edge_percent": round(edge, 2),
-        "entry_price": int(entry),
-        "target_exit": target,
-        "metric_used": "fmv" if fmv is not None else "rap_like",
-        "risk_notes": market.get("notes", []),
+    a { color: inherit; text-decoration: none; }
+    .grid {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.34;
+      background-image: linear-gradient(rgba(92,230,202,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(92,230,202,.08) 1px, transparent 1px);
+      background-size: 72px 72px;
+      mask-image: linear-gradient(to bottom, black 0%, transparent 78%);
     }
-
-
-def _asset_id_from_catalog_url(url: str) -> Optional[int]:
-    m = re.search(r"/catalog/(\d+)", url)
-    if m:
-        return int(m.group(1))
-    return None
-
-
-def _extract_asset_id(entry: Any) -> Optional[int]:
-    if isinstance(entry, (list, tuple)) and len(entry) >= 1:
-        try:
-            return int(entry[0])
-        except Exception:
-            return None
-    if isinstance(entry, dict):
-        for k in ("assetId", "AssetId", "itemId", "item_id", "id"):
-            val = entry.get(k)
-            if val is not None:
-                try:
-                    return int(val)
-                except Exception:
-                    continue
-        return None
-    if isinstance(entry, int):
-        return entry
-    return None
-
-
-def build_compact_item_payload(asset_id: int, history_points: int = 120) -> dict:
-    key = cache_key_for_asset(asset_id)
-    prev = cache_get(key)
-    prev_payload = prev["payload"] if prev else None
-
-    roblox = get_catalog_details(asset_id)
-    collectible_item_id = _extract_collectible_item_id(roblox)
-
-    market_notes = []
-    resale_data = {}
-    resale_history = {"data": []}
-
-    # Resellers snapshot (best for traders)
-    listings = {"count": 0, "lowest_price": None, "top_5": []}
-    try:
-        resellers_raw = get_resellers(asset_id, limit=30)
-        listings = summarize_resellers(resellers_raw)
-    except HTTPException as e:
-        market_notes.append(f"Resellers unavailable (status {e.status_code}).")
-
-    # Resale data/history (may 404; don't fail)
-    try:
-        resale_data = get_resale_data_dual(asset_id, collectible_item_id)
-    except HTTPException as e:
-        market_notes.append(f"Resale-data unavailable (status {e.status_code}).")
-
-    try:
-        full_history = get_resale_history_dual(asset_id, collectible_item_id)
-        # truncate to avoid ResponseTooLarge
-        if isinstance(full_history, dict) and isinstance(full_history.get("data"), list):
-            data = full_history["data"]
-            if len(data) > history_points:
-                full_history = {**full_history, "data": data[-history_points:], "truncated": True}
-        resale_history = full_history if isinstance(full_history, dict) else {"data": []}
-    except HTTPException as e:
-        market_notes.append(f"Resale-history unavailable (status {e.status_code}).")
-
-    market = None
-    try:
-        market = compute_market_stats(resale_data or {}, resale_history or {"data": []})
-    except Exception:
-        market = None
-
-    # Fallback to previous cached market if fresh compute failed
-    if market is None and prev_payload and isinstance(prev_payload.get("market"), dict):
-        market = prev_payload["market"]
-        market_notes.append("Live market refresh failed; using last cached market snapshot.")
-
-    if market is None:
-        market = {"fmv": None, "rap_like": None, "demand": "Unknown", "trend": "Unknown", "projected": False}
-        market_notes.append("No cached market snapshot available yet.")
-
-    # Trader scorecard
-    trader = None
-    try:
-        trader = trader_scorecard(market, listings)
-    except Exception:
-        trader = None
-
-    return {
-        "source": "roblox-only:full-analysis",
-        "asset_id": asset_id,
-        "collectible_item_id": collectible_item_id,
-        "roblox": roblox,
-        "market": market,
-        "listings": listings,
-        "trader": trader,
-        "analysis": {
-            "notes": market_notes,
-            "generated_at": time.time(),
-        },
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      backdrop-filter: blur(18px);
+      background: rgba(7, 16, 15, 0.82);
+      border-bottom: 1px solid var(--line);
     }
+    nav {
+      width: min(1180px, calc(100% - 40px));
+      height: 76px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+    }
+    .brand { display: inline-flex; align-items: center; gap: 12px; font-weight: 900; }
+    .mark {
+      width: 38px;
+      height: 38px;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(92,230,202,.38);
+      border-radius: 8px;
+      color: var(--teal);
+      background: linear-gradient(145deg, rgba(92,230,202,.22), rgba(255,189,98,.12));
+      box-shadow: 0 12px 38px rgba(92,230,202,.12);
+    }
+    .links { display: flex; align-items: center; gap: 24px; color: var(--muted); font-weight: 750; }
+    .links a:hover { color: var(--text); }
+    .cta {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 18px;
+      border-radius: 8px;
+      border: 1px solid rgba(92,230,202,.36);
+      background: rgba(92,230,202,.14);
+      color: #e7fff8;
+      font-weight: 900;
+    }
+    main { position: relative; }
+    .hero {
+      width: min(1180px, calc(100% - 40px));
+      margin: 0 auto;
+      min-height: calc(100vh - 76px);
+      display: grid;
+      grid-template-columns: minmax(0, .96fr) minmax(420px, 1.04fr);
+      align-items: center;
+      gap: 44px;
+      padding: 54px 0 50px;
+    }
+    h1 {
+      margin: 0;
+      max-width: 760px;
+      font-size: clamp(2.8rem, 5.25vw, 4.55rem);
+      line-height: .96;
+      letter-spacing: 0;
+      text-wrap: balance;
+    }
+    .lead {
+      max-width: 625px;
+      margin: 28px 0 0;
+      color: #bfdbd5;
+      font-size: 1.18rem;
+      line-height: 1.68;
+    }
+    .actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 34px; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 50px;
+      padding: 0 22px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.05);
+      font-weight: 900;
+    }
+    .button.primary { color: #06231e; border: 0; background: linear-gradient(135deg, var(--teal), #a0f7df); box-shadow: 0 16px 44px rgba(92,230,202,.22); }
+    .board {
+      min-height: 480px;
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(92,230,202,.1), transparent 38%), linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.025));
+      box-shadow: 0 26px 90px rgba(0,0,0,.38);
+    }
+    .board:before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: linear-gradient(rgba(244,255,251,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(244,255,251,.06) 1px, transparent 1px);
+      background-size: 44px 44px;
+      transform: perspective(700px) rotateX(58deg) translateY(58px) scale(1.25);
+      transform-origin: bottom;
+    }
+    .node {
+      position: absolute;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-strong);
+      padding: 14px;
+      box-shadow: 0 18px 54px rgba(0,0,0,.32);
+    }
+    .node h2, .node h3 { margin: 0; font-size: .95rem; }
+    .node p { margin: 8px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.48; }
+    .node.one { left: 42px; top: 42px; width: 270px; }
+    .node.two { right: 34px; top: 94px; width: 232px; }
+    .node.three { left: 64px; bottom: 42px; width: 305px; }
+    .node.four { right: 54px; bottom: 72px; width: 220px; }
+    .play {
+      position: absolute;
+      right: 30%;
+      top: 34%;
+      width: 152px;
+      aspect-ratio: 1;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255,189,98,.42);
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(255,189,98,.2), transparent), rgba(10,17,20,.72);
+      color: var(--amber);
+      font-weight: 950;
+    }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+    .metric { padding: 10px; border-radius: 8px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); color: var(--muted); font-size: .76rem; }
+    .metric strong { display: block; color: var(--text); font-size: 1rem; margin-bottom: 3px; }
+    .band { border-top: 1px solid var(--line); background: rgba(255,255,255,.025); }
+    .section { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 78px 0; }
+    .section-head { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 30px; }
+    h2 { margin: 0; max-width: 730px; font-size: clamp(2rem, 4vw, 3.25rem); line-height: 1; }
+    .section-head p { max-width: 440px; margin: 0; color: var(--muted); line-height: 1.65; }
+    .services { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+    .service { min-height: 198px; padding: 20px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.04); }
+    .service span { display: inline-grid; place-items: center; width: 38px; height: 38px; margin-bottom: 28px; border-radius: 8px; background: rgba(92,230,202,.12); color: var(--teal); font-weight: 950; }
+    .service h3 { margin: 0 0 10px; font-size: 1rem; }
+    .service p { margin: 0; color: var(--muted); line-height: 1.55; font-size: .93rem; }
+    .work { display: grid; grid-template-columns: .94fr 1.06fr; gap: 18px; }
+    .case, .api { border-radius: 8px; border: 1px solid var(--line); background: var(--panel); padding: 28px; min-height: 280px; }
+    .case h3 { margin: 0 0 12px; font-size: 1.55rem; }
+    .case p { margin: 0; color: var(--muted); line-height: 1.65; }
+    .step { display: flex; justify-content: space-between; gap: 12px; padding: 14px 0; margin-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-weight: 750; }
+    .step strong { color: var(--text); }
+    pre { margin: 0; white-space: pre-wrap; color: #cbefe6; line-height: 1.7; font-size: .94rem; }
+    footer { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 34px 0 46px; color: var(--muted); display: flex; justify-content: space-between; gap: 20px; border-top: 1px solid var(--line); }
+    @media (max-width: 1050px) { .services { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 940px) {
+      .links { display: none; }
+      .hero { grid-template-columns: 1fr; padding-top: 52px; }
+      .board { min-height: 450px; }
+      .work { grid-template-columns: 1fr; }
+      .section-head { display: block; }
+      .section-head p { margin-top: 16px; }
+    }
+    @media (max-width: 620px) {
+      nav, .hero, .section, footer { width: min(100% - 28px, 1180px); }
+      .cta { display: none; }
+      h1 { font-size: clamp(2.65rem, 14vw, 4rem); }
+      .lead { font-size: 1.04rem; }
+      .actions { display: grid; }
+      .button { width: 100%; }
+      .services { grid-template-columns: 1fr; }
+      .node { position: relative; inset: auto !important; width: auto !important; margin: 14px; }
+      .board { min-height: auto; padding: 10px 0; }
+      .board:before, .play { display: none; }
+      footer { display: block; }
+      footer span { display: block; margin-top: 10px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="grid"></div>
+  <header>
+    <nav aria-label="Main navigation">
+      <a class="brand" href="/" aria-label="Zixle Studios home"><span class="mark">ZX</span><span>Zixle Studios</span></a>
+      <div class="links"><a href="#work">Work</a><a href="#services">Services</a><a href="#marketplace">Marketplace</a><a href="#api">API</a><a href="mailto:hello@zixlestudios.com">Contact</a></div>
+      <a class="cta" href="mailto:hello@zixlestudios.com">Start a build</a>
+    </nav>
+  </header>
+  <main>
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <h1 id="hero-title">Roblox games with access, style, and systems.</h1>
+        <p class="lead">Zixle Studios builds Roblox experiences, game access flows, merch marketplace systems, UI, economy tools, and launch-ready prototypes for creators who want ideas to feel playable fast.</p>
+        <div class="actions"><a class="button primary" href="mailto:hello@zixlestudios.com">Build with Zixle</a><a class="button" href="#api">View live tools</a></div>
+      </div>
+      <div class="board" aria-label="Roblox development systems board">
+        <div class="play">PLAY</div>
+        <article class="node one"><h2>Roblox Game Blueprint</h2><p>World access, progression, store loops, and rewards designed before the first sprint.</p><div class="metrics"><div class="metric"><strong>5</strong>systems</div><div class="metric"><strong>Pass</strong>access</div><div class="metric"><strong>Live</strong>API</div></div></article>
+        <article class="node two"><h3>Gameplay Logic</h3><p>Controller states, access checks, inventory hooks, and server-safe routes.</p></article>
+        <article class="node three"><h3>Marketplace Tools</h3><p>Merch drops, item lookup, inventory checks, and economy helpers stay online.</p></article>
+        <article class="node four"><h3>Creator Launch Stack</h3><p>Prototype, access, merch, test, publish.</p></article>
+      </div>
+    </section>
+    <section class="band" id="services"><div class="section"><div class="section-head"><h2>Development support for Roblox worlds.</h2><p>Focused help across the parts that make an experience feel real: game access, scripting, interfaces, marketplace systems, backend tools, and launch polish.</p></div><div class="services">
+      <article class="service"><span>01</span><h3>Roblox Experiences</h3><p>World structure, gameplay loops, progression, and player-ready scripting.</p></article>
+      <article class="service"><span>02</span><h3>Access Systems</h3><p>Game pass checks, role gates, private areas, rewards, and permissions.</p></article>
+      <article class="service" id="marketplace"><span>03</span><h3>Marketplace & Merch</h3><p>Shop flows, merch drops, item pages, inventory hooks, and purchase logic.</p></article>
+      <article class="service"><span>04</span><h3>Game UI</h3><p>Menus, HUDs, shops, progression screens, and readable in-game flows.</p></article>
+      <article class="service"><span>05</span><h3>Backend Tools</h3><p>Fast APIs, data bridges, admin helpers, and analytics-ready endpoints.</p></article>
+    </div></div></section>
+    <section class="section" id="work"><div class="work"><article class="case"><h3>From rough Roblox idea to playable launch.</h3><p>Zixle Studios can help shape the flow, build the core mechanics, add access systems, connect marketplace merch, and clean up the parts players notice first.</p><div class="step"><strong>Plan</strong><span>core loop, access, and player goals</span></div><div class="step"><strong>Build</strong><span>systems, UI, merch, and API support</span></div><div class="step"><strong>Polish</strong><span>feedback, responsiveness, launch pass</span></div></article><article class="api" id="api"><pre>{
+  "studio": "Zixle Studios",
+  "focus": ["Roblox development", "game access", "marketplace merch"],
+  "status": "/health",
+  "live_endpoints": ["/market/item/search?q=dominus", "/market/item/{item_id}", "/roblox/player/{username}/inventory"]
+}</pre></article></div></section>
+  </main>
+  <footer><strong>Zixle Studios</strong><span>Roblox game development, tools, access systems, and marketplace polish.</span></footer>
+</body>
+</html>
+"""
 
-async def hot_refresher_loop():
-    while True:
-        try:
-            # pick the hottest items (by request count)
-            keys = list(HOT_COUNT.keys())
-            keys.sort(key=lambda k: HOT_COUNT[k], reverse=True)
 
-            refreshed = 0
-            for key in keys:
-                if refreshed >= MAX_REFRESH_PER_CYCLE:
-                    break
-
-                # only refresh if seen recently (last 30 minutes)
-                last_seen = HOT_LAST_SEEN.get(key, 0.0)
-                if (time.time() - last_seen) > 1800:
-                    continue
-
-                row = cache_get(key)
-                if row and (time.time() - row["updated_at"]) < HOT_REFRESH_SECONDS:
-                    continue  # already fresh enough
-
-                # parse asset id
-                if not key.startswith("item:"):
-                    continue
-                asset_id = int(key.split(":", 1)[1])
-
-                # throttle upstream so we don't get rate-limited
-                await _global_throttle()
-
-                # refresh and store
-                payload = build_compact_item_payload(asset_id, history_points=120)
-                cache_put(key, payload)
-                refreshed += 1
-
-            await asyncio.sleep(SLEEP_TICK_SECONDS)
-        except Exception:
-            # never crash the loop
-            await asyncio.sleep(SLEEP_TICK_SECONDS)
-
-
-# -------------------------
-# Routes
-# -------------------------
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the Roli Bridge API. Use /health to check status."}
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return HTMLResponse(HOME_HTML)
 
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "studio": "Zixle Studios"}
 
 
-@app.get("/market/item/{item_id}")
-def market_item(item_id: int):
-    roblox = get_catalog_details(item_id)
-    collectible_item_id = _extract_collectible_item_id(roblox)
-    
-    resale = get_resale_data_dual(item_id, collectible_item_id)
-    history = get_resale_history_dual(item_id, collectible_item_id)
-    stats = compute_market_stats(resale, history)
+@app.get("/api")
+def api_info():
     return {
-        "source": "roblox-only",
-        "item_id": item_id,
-        "collectible_item_id": collectible_item_id,
-        "roblox": roblox,
-        "market": stats
+        "studio": "Zixle Studios",
+        "focus": ["Roblox development", "game access", "marketplace merch", "game UI"],
+        "status": "online",
     }
-
-
-@app.get("/market/item/search")
-def search_item_then_get_stats(q: str, limit: int = 5):
-    params = {
-        "keyword": q,
-        "limit": min(max(limit, 1), 10),
-        "sortType": "Relevance",
-        "category": "All",
-    }
-    data = _http_get_json(ROBLOX_CATALOG_SEARCH_URL, params=params)
-    items = data.get("data")
-    if not isinstance(items, list):
-        items = []
-    if not items:
-        api_error(404, "NO_SEARCH_RESULTS", "No catalog items found for search query.", {"query": q})
-    results = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        asset_id = it.get("id")
-        if not isinstance(asset_id, int):
-            continue
-        results.append({
-            "source": "roblox-search",
-            "item_id": asset_id,
-            "roblox": it,
-        })
-    return {"source": "roblox-search", "query": q, "results": results}
-
-
-@app.post("/market/item/analyze")
-def analyze_item_from_catalog_link(
-    catalog_url: str = Body(..., embed=True),
-    force_refresh: bool = Query(False),
-):
-    asset_id_opt = _asset_id_from_catalog_url(catalog_url)
-    if asset_id_opt is None:
-        api_error(400, "INVALID_LINK", "Invalid catalog link")
-    asset_id: int = asset_id_opt  # type: ignore
-
-    key = cache_key_for_asset(asset_id)
-    mark_hot(key)
-
-    row = cache_get(key)
-
-    # Return cached immediately if fresh and not forcing refresh
-    if row and is_fresh(row["updated_at"]) and not force_refresh:
-        payload = row["payload"]
-        payload["cache"] = {"hit": True, "fresh": True, "updated_at": row["updated_at"]}
-        payload["catalog_url"] = catalog_url
-        return payload
-
-    # If we have stale cache, return it (stale-while-revalidate style)
-    # and let background refresh catch up
-    if row and not force_refresh:
-        payload = row["payload"]
-        payload["cache"] = {"hit": True, "fresh": False, "updated_at": row["updated_at"]}
-        payload["catalog_url"] = catalog_url
-        payload.setdefault("analysis", {}).setdefault("notes", []).append(
-            "Returned cached data (stale). Background refresh scheduled."
-        )
-        return payload
-
-    # Force refresh: compute now (may be slower)
-    payload = build_compact_item_payload(asset_id, history_points=120)
-    cache_put(key, payload)
-    payload["cache"] = {"hit": False, "fresh": True, "updated_at": time.time()}
-    payload["catalog_url"] = catalog_url
-    return payload
-
-
-@app.get("/market/player/{username}")
-def market_player(username: str):
-    user_id = _username_to_user_id(username)
-    data = _http_get_json(f"https://users.roblox.com/v1/users/{user_id}")
-    return {
-        "source": "roblox:users",
-        "username": username,
-        "user_id": user_id,
-        "data": data,
-    }
-
-
-@app.get("/market/player/{username}/inventory")
-def market_player_inventory(username: str):
-    user_id = _username_to_user_id(username)
-    can_view = _http_get_json(f"https://inventory.roblox.com/v1/users/{user_id}/can-view-inventory")
-    if not can_view.get("canView", False):
-        api_error(404, "INVENTORY_PRIVATE", "Inventory is private or not viewable")
-    data = _http_get_json(f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles")
-    assets = data.get("data", [])
-    enriched = []
-    for a in assets:
-        asset_id = _extract_asset_id(a)
-        if asset_id is not None:
-            enriched.append({"item_id": asset_id, "roblox_data": a})
-    return {
-        "source": "roblox:inventory",
-        "username": username,
-        "user_id": user_id,
-        "assets": enriched,
-    }
-
-
-@app.get("/roblox/player/{username}/inventory")
-def roblox_player_inventory(
-    username: str,
-    limit: int = Query(100, ge=1, le=100),
-    sort_order: str = Query("Desc", pattern="^(Asc|Desc)$"),
-    cursor: Optional[str] = None,
-):
-    user_id = _username_to_user_id(username)
-    can_view = _http_get_json(f"https://inventory.roblox.com/v1/users/{user_id}/can-view-inventory")
-    if not can_view.get("canView", False):
-        api_error(404, "INVENTORY_PRIVATE", "Inventory is private or not viewable")
-    params = {"limit": limit, "sortOrder": sort_order}
-    if cursor:
-        params["cursor"] = cursor
-    data = _http_get_json(f"https://inventory.roblox.com/v1/users/{user_id}/assets/collectibles", params=params)
-    return {
-        "source": "roblox:inventory",
-        "username": username,
-        "user_id": user_id,
-        "previousPageCursor": data.get("previousPageCursor"),
-        "nextPageCursor": data.get("nextPageCursor"),
-        "data": data.get("data", []),
-    }
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
