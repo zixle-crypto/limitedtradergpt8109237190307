@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
-app = FastAPI(title="Zixle Studios", version="2.0.0")
+app = FastAPI(title="Zixle Studios", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,274 +18,41 @@ HOME_HTML = """
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Zixle Studios | Roblox Game Development</title>
-  <meta name="description" content="Zixle Studios builds Roblox games, access systems, marketplace merch flows, game UI, economy tools, and launch-ready prototypes." />
+  <title>Zixle Studios | Original Roblox Games</title>
+  <meta name="description" content="Zixle Studios creates original Roblox games, player worlds, bacon avatar squads, access passes, updates, events, and merch drops." />
   <style>
-    :root {
-      color-scheme: dark;
-      --bg: #07100f;
-      --panel: rgba(15, 31, 29, 0.78);
-      --panel-strong: rgba(18, 37, 35, 0.94);
-      --text: #f4fffb;
-      --muted: #a7bdb8;
-      --line: rgba(145, 226, 209, 0.2);
-      --teal: #5ce6ca;
-      --amber: #ffbd62;
-      --blue: #72a7ff;
-    }
-    * { box-sizing: border-box; }
-    html { scroll-behavior: smooth; }
-    body {
-      margin: 0;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background:
-        radial-gradient(circle at 18% 12%, rgba(92, 230, 202, 0.2), transparent 34rem),
-        radial-gradient(circle at 88% 12%, rgba(255, 189, 98, 0.14), transparent 32rem),
-        linear-gradient(180deg, #081311 0%, #07100f 48%, #0a1215 100%);
-      color: var(--text);
-    }
-    a { color: inherit; text-decoration: none; }
-    .grid {
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: 0.34;
-      background-image: linear-gradient(rgba(92,230,202,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(92,230,202,.08) 1px, transparent 1px);
-      background-size: 72px 72px;
-      mask-image: linear-gradient(to bottom, black 0%, transparent 78%);
-    }
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 5;
-      backdrop-filter: blur(18px);
-      background: rgba(7, 16, 15, 0.82);
-      border-bottom: 1px solid var(--line);
-    }
-    nav {
-      width: min(1180px, calc(100% - 40px));
-      height: 76px;
-      margin: 0 auto;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 22px;
-    }
-    .brand { display: inline-flex; align-items: center; gap: 12px; font-weight: 900; }
-    .mark {
-      width: 38px;
-      height: 38px;
-      display: grid;
-      place-items: center;
-      border: 1px solid rgba(92,230,202,.38);
-      border-radius: 8px;
-      color: var(--teal);
-      background: linear-gradient(145deg, rgba(92,230,202,.22), rgba(255,189,98,.12));
-      box-shadow: 0 12px 38px rgba(92,230,202,.12);
-    }
-    .links { display: flex; align-items: center; gap: 24px; color: var(--muted); font-weight: 750; }
-    .links a:hover { color: var(--text); }
-    .cta {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 42px;
-      padding: 0 18px;
-      border-radius: 8px;
-      border: 1px solid rgba(92,230,202,.36);
-      background: rgba(92,230,202,.14);
-      color: #e7fff8;
-      font-weight: 900;
-    }
-    main { position: relative; }
-    .hero {
-      width: min(1180px, calc(100% - 40px));
-      margin: 0 auto;
-      min-height: calc(100vh - 76px);
-      display: grid;
-      grid-template-columns: minmax(0, .96fr) minmax(420px, 1.04fr);
-      align-items: center;
-      gap: 44px;
-      padding: 54px 0 50px;
-    }
-    h1 {
-      margin: 0;
-      max-width: 760px;
-      font-size: clamp(2.8rem, 5.25vw, 4.55rem);
-      line-height: .96;
-      letter-spacing: 0;
-      text-wrap: balance;
-    }
-    .lead {
-      max-width: 625px;
-      margin: 28px 0 0;
-      color: #bfdbd5;
-      font-size: 1.18rem;
-      line-height: 1.68;
-    }
-    .actions { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 34px; }
-    .button {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 50px;
-      padding: 0 22px;
-      border-radius: 8px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.05);
-      font-weight: 900;
-    }
-    .button.primary { color: #06231e; border: 0; background: linear-gradient(135deg, var(--teal), #a0f7df); box-shadow: 0 16px 44px rgba(92,230,202,.22); }
-    .board {
-      min-height: 480px;
-      position: relative;
-      overflow: hidden;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: linear-gradient(135deg, rgba(92,230,202,.1), transparent 38%), linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.025));
-      box-shadow: 0 26px 90px rgba(0,0,0,.38);
-    }
-    .board:before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background-image: linear-gradient(rgba(244,255,251,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(244,255,251,.06) 1px, transparent 1px);
-      background-size: 44px 44px;
-      transform: perspective(700px) rotateX(58deg) translateY(58px) scale(1.25);
-      transform-origin: bottom;
-    }
-    .node {
-      position: absolute;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel-strong);
-      padding: 14px;
-      box-shadow: 0 18px 54px rgba(0,0,0,.32);
-    }
-    .node h2, .node h3 { margin: 0; font-size: .95rem; }
-    .node p { margin: 8px 0 0; color: var(--muted); font-size: .8rem; line-height: 1.48; }
-    .node.one { left: 42px; top: 42px; width: 270px; }
-    .node.two { right: 34px; top: 94px; width: 232px; }
-    .node.three { left: 64px; bottom: 42px; width: 305px; }
-    .node.four { right: 54px; bottom: 72px; width: 220px; }
-    .play {
-      position: absolute;
-      right: 30%;
-      top: 34%;
-      width: 152px;
-      aspect-ratio: 1;
-      display: grid;
-      place-items: center;
-      border: 1px solid rgba(255,189,98,.42);
-      border-radius: 8px;
-      background: linear-gradient(135deg, rgba(255,189,98,.2), transparent), rgba(10,17,20,.72);
-      color: var(--amber);
-      font-weight: 950;
-    }
-    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
-    .metric { padding: 10px; border-radius: 8px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); color: var(--muted); font-size: .76rem; }
-    .metric strong { display: block; color: var(--text); font-size: 1rem; margin-bottom: 3px; }
-    .band { border-top: 1px solid var(--line); background: rgba(255,255,255,.025); }
-    .section { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 78px 0; }
-    .section-head { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 30px; }
-    h2 { margin: 0; max-width: 730px; font-size: clamp(2rem, 4vw, 3.25rem); line-height: 1; }
-    .section-head p { max-width: 440px; margin: 0; color: var(--muted); line-height: 1.65; }
-    .services { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
-    .service { min-height: 198px; padding: 20px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,.04); }
-    .service span { display: inline-grid; place-items: center; width: 38px; height: 38px; margin-bottom: 28px; border-radius: 8px; background: rgba(92,230,202,.12); color: var(--teal); font-weight: 950; }
-    .service h3 { margin: 0 0 10px; font-size: 1rem; }
-    .service p { margin: 0; color: var(--muted); line-height: 1.55; font-size: .93rem; }
-    .work { display: grid; grid-template-columns: .94fr 1.06fr; gap: 18px; }
-    .case, .api { border-radius: 8px; border: 1px solid var(--line); background: var(--panel); padding: 28px; min-height: 280px; }
-    .case h3 { margin: 0 0 12px; font-size: 1.55rem; }
-    .case p { margin: 0; color: var(--muted); line-height: 1.65; }
-    .step { display: flex; justify-content: space-between; gap: 12px; padding: 14px 0; margin-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-weight: 750; }
-    .step strong { color: var(--text); }
-    pre { margin: 0; white-space: pre-wrap; color: #cbefe6; line-height: 1.7; font-size: .94rem; }
-    footer { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 34px 0 46px; color: var(--muted); display: flex; justify-content: space-between; gap: 20px; border-top: 1px solid var(--line); }
-    @media (max-width: 1050px) { .services { grid-template-columns: repeat(2, 1fr); } }
-    @media (max-width: 940px) {
-      .links { display: none; }
-      .hero { grid-template-columns: 1fr; padding-top: 52px; }
-      .board { min-height: 450px; }
-      .work { grid-template-columns: 1fr; }
-      .section-head { display: block; }
-      .section-head p { margin-top: 16px; }
-    }
-    @media (max-width: 620px) {
-      nav, .hero, .section, footer { width: min(100% - 28px, 1180px); }
-      .cta { display: none; }
-      h1 { font-size: clamp(2.65rem, 14vw, 4rem); }
-      .lead { font-size: 1.04rem; }
-      .actions { display: grid; }
-      .button { width: 100%; }
-      .services { grid-template-columns: 1fr; }
-      .node { position: relative; inset: auto !important; width: auto !important; margin: 14px; }
-      .board { min-height: auto; padding: 10px 0; }
-      .board:before, .play { display: none; }
-      footer { display: block; }
-      footer span { display: block; margin-top: 10px; }
-    }
+    :root { color-scheme: dark; --bg:#071013; --ink:#f7fffb; --muted:#a9bdb8; --line:rgba(160,237,220,.22); --teal:#57e6c6; --amber:#ffc15f; --blue:#7ab0ff; --pink:#ff6fae; --panel:rgba(13,29,31,.78); }
+    *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(circle at 18% 10%,rgba(87,230,198,.22),transparent 34rem),radial-gradient(circle at 82% 8%,rgba(255,193,95,.16),transparent 32rem),linear-gradient(180deg,#091416 0%,#071013 45%,#0b1218 100%);color:var(--ink)}
+    a{color:inherit;text-decoration:none}.scan{position:fixed;inset:0;pointer-events:none;opacity:.32;background-image:linear-gradient(rgba(87,230,198,.08) 1px,transparent 1px),linear-gradient(90deg,rgba(87,230,198,.08) 1px,transparent 1px);background-size:68px 68px;mask-image:linear-gradient(to bottom,black,transparent 76%)}
+    header{position:sticky;top:0;z-index:10;background:rgba(7,16,19,.82);backdrop-filter:blur(18px);border-bottom:1px solid var(--line)} nav{width:min(1200px,calc(100% - 40px));height:76px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:20px}.brand{display:flex;align-items:center;gap:12px;font-weight:950}.mark{width:40px;height:40px;display:grid;place-items:center;border-radius:8px;border:1px solid rgba(87,230,198,.45);background:linear-gradient(145deg,rgba(87,230,198,.24),rgba(255,193,95,.16));color:var(--teal);box-shadow:0 14px 42px rgba(87,230,198,.14)}.links{display:flex;gap:24px;color:var(--muted);font-weight:800}.links a:hover{color:var(--ink)}.cta{min-height:42px;display:inline-flex;align-items:center;padding:0 18px;border-radius:8px;border:1px solid rgba(87,230,198,.42);background:rgba(87,230,198,.14);font-weight:900}
+    .hero{width:min(1200px,calc(100% - 40px));min-height:calc(100vh - 76px);margin:auto;display:grid;grid-template-columns:.92fr 1.08fr;align-items:center;gap:44px;padding:48px 0}.tag{display:inline-flex;margin-bottom:20px;color:#081817;background:linear-gradient(135deg,var(--teal),#a6ffe7);border-radius:8px;padding:9px 12px;font-size:.82rem;font-weight:950;text-transform:uppercase;letter-spacing:.08em}h1{margin:0;font-size:clamp(3rem,5.6vw,5.25rem);line-height:.93;letter-spacing:0;max-width:780px}.lead{max-width:650px;margin:26px 0 0;color:#c2d9d4;font-size:1.18rem;line-height:1.68}.actions{display:flex;flex-wrap:wrap;gap:14px;margin-top:32px}.btn{min-height:50px;display:inline-flex;align-items:center;justify-content:center;padding:0 22px;border-radius:8px;border:1px solid var(--line);background:rgba(255,255,255,.05);font-weight:950}.btn.primary{color:#061f1b;background:linear-gradient(135deg,var(--teal),#a0f8df);border:0;box-shadow:0 18px 48px rgba(87,230,198,.23)}
+    .arena{position:relative;min-height:520px;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:linear-gradient(135deg,rgba(87,230,198,.1),transparent 36%),linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,.025));box-shadow:0 28px 90px rgba(0,0,0,.42)}.arena:before{content:"";position:absolute;inset:0;background-image:linear-gradient(rgba(247,255,251,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(247,255,251,.06) 1px,transparent 1px);background-size:42px 42px;transform:perspective(700px) rotateX(58deg) translateY(80px) scale(1.28);transform-origin:bottom}.portal{position:absolute;left:50%;top:45%;width:160px;height:160px;transform:translate(-50%,-50%);border:1px solid rgba(255,193,95,.42);border-radius:8px;background:linear-gradient(135deg,rgba(255,193,95,.24),rgba(122,176,255,.08));display:grid;place-items:center;color:var(--amber);font-weight:1000;box-shadow:0 0 70px rgba(255,193,95,.16)}
+    .avatar{position:absolute;width:102px;height:188px;filter:drop-shadow(0 18px 22px rgba(0,0,0,.38))}.head{position:absolute;left:25px;top:18px;width:52px;height:52px;border-radius:8px;background:#ffd29b;border:3px solid rgba(0,0,0,.18)}.face{position:absolute;left:36px;top:43px;width:30px;height:8px;border-radius:0 0 12px 12px;border-bottom:4px solid #231b19}.hair{position:absolute;left:18px;top:8px;width:66px;height:28px;border-radius:12px 12px 4px 4px;background:repeating-linear-gradient(90deg,#8a4a25 0 9px,#c9793d 9px 17px,#f1a15b 17px 24px);transform:rotate(-3deg)}.torso{position:absolute;left:18px;top:72px;width:66px;height:66px;border-radius:8px;background:linear-gradient(135deg,#1c7dff,#63d0ff);border:3px solid rgba(255,255,255,.13)}.arm{position:absolute;top:78px;width:24px;height:62px;border-radius:8px;background:#ffd29b}.arm.l{left:0;transform:rotate(10deg)}.arm.r{right:0;transform:rotate(-10deg)}.leg{position:absolute;top:136px;width:30px;height:50px;border-radius:8px;background:#2d3545}.leg.l{left:19px}.leg.r{right:19px}.a1{left:44px;bottom:44px}.a2{right:70px;bottom:70px;transform:scale(.92)}.a2 .torso{background:linear-gradient(135deg,#ff6fae,#ffc15f)}.a3{left:56%;top:66px;transform:scale(.82)}.a3 .torso{background:linear-gradient(135deg,#57e6c6,#7ab0ff)}.label{position:absolute;padding:12px 14px;border:1px solid var(--line);border-radius:8px;background:rgba(10,25,25,.9);font-weight:900}.label.one{left:34px;top:36px}.label.two{right:34px;top:50px}.label.three{right:48px;bottom:42px}.label small{display:block;color:var(--muted);font-weight:700;margin-top:5px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:26px}.stat{padding:16px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.045)}.stat strong{display:block;font-size:1.45rem;color:#fff}.stat span{color:var(--muted);font-weight:800;font-size:.85rem}
+    .band{border-top:1px solid var(--line);background:rgba(255,255,255,.025)}.section{width:min(1200px,calc(100% - 40px));margin:auto;padding:78px 0}.section-head{display:flex;justify-content:space-between;align-items:end;gap:24px;margin-bottom:30px}h2{margin:0;font-size:clamp(2.1rem,4vw,3.45rem);line-height:1;max-width:760px}.section-head p{max-width:450px;color:var(--muted);line-height:1.65;margin:0}.games{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}.game,.tile{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:24px}.game{min-height:340px;background:linear-gradient(135deg,rgba(87,230,198,.1),transparent),var(--panel)}.game h3,.tile h3{margin:0 0 10px;font-size:1.55rem}.game p,.tile p{color:var(--muted);line-height:1.58}.world{height:150px;margin-top:22px;border-radius:8px;border:1px solid var(--line);background:linear-gradient(135deg,rgba(122,176,255,.24),rgba(255,193,95,.16)),repeating-linear-gradient(90deg,rgba(255,255,255,.08) 0 2px,transparent 2px 30px);position:relative;overflow:hidden}.cube{position:absolute;width:50px;height:50px;border-radius:7px;background:linear-gradient(135deg,#57e6c6,#1d7364);box-shadow:90px 34px 0 #ffc15f,190px 10px 0 #ff6fae,310px 54px 0 #7ab0ff}.cube{left:52px;top:42px}.tiles{display:grid;gap:16px}.pill{display:inline-flex;padding:8px 10px;border-radius:8px;background:rgba(87,230,198,.12);color:var(--teal);font-size:.78rem;font-weight:950;text-transform:uppercase;letter-spacing:.08em}.features{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.feature{min-height:190px;padding:20px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.04)}.feature span{display:grid;place-items:center;width:38px;height:38px;border-radius:8px;margin-bottom:26px;background:rgba(87,230,198,.12);color:var(--teal);font-weight:950}.feature h3{margin:0 0 10px}.feature p{margin:0;color:var(--muted);line-height:1.55}.shop{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.item{padding:22px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.045)}.item-art{height:120px;border-radius:8px;background:linear-gradient(135deg,rgba(87,230,198,.22),rgba(255,193,95,.18));display:grid;place-items:center;font-size:3rem;font-weight:1000;color:white;margin-bottom:18px}.item h3{margin:0 0 8px}.item p{color:var(--muted);line-height:1.5;margin:0}footer{width:min(1200px,calc(100% - 40px));margin:auto;padding:34px 0 46px;border-top:1px solid var(--line);color:var(--muted);display:flex;justify-content:space-between;gap:20px}
+    @media(max-width:1000px){.hero,.games{grid-template-columns:1fr}.features,.shop{grid-template-columns:repeat(2,1fr)}.links{display:none}.arena{min-height:470px}}@media(max-width:620px){nav,.hero,.section,footer{width:min(100% - 28px,1200px)}.cta{display:none}h1{font-size:clamp(2.7rem,14vw,4rem)}.features,.shop{grid-template-columns:1fr}.arena{min-height:620px}.label{position:relative;inset:auto!important;margin:14px}.portal{display:none}.avatar{transform:scale(.78)}.a1{left:10px}.a2{right:10px}.a3{left:120px;top:250px}.stats{grid-template-columns:1fr}footer{display:block}footer span{display:block;margin-top:10px}}
   </style>
 </head>
 <body>
-  <div class="grid"></div>
-  <header>
-    <nav aria-label="Main navigation">
-      <a class="brand" href="/" aria-label="Zixle Studios home"><span class="mark">ZX</span><span>Zixle Studios</span></a>
-      <div class="links"><a href="#work">Work</a><a href="#services">Services</a><a href="#marketplace">Marketplace</a><a href="#api">API</a><a href="mailto:hello@zixlestudios.com">Contact</a></div>
-      <a class="cta" href="mailto:hello@zixlestudios.com">Start a build</a>
-    </nav>
-  </header>
+  <div class="scan"></div>
+  <header><nav><a class="brand" href="/"><span class="mark">ZX</span><span>Zixle Studios</span></a><div class="links"><a href="#games">Games</a><a href="#players">Players</a><a href="#characters">Characters</a><a href="#shop">Merch</a></div><a class="cta" href="#games">Play our worlds</a></nav></header>
   <main>
-    <section class="hero" aria-labelledby="hero-title">
-      <div>
-        <h1 id="hero-title">Roblox games with access, style, and systems.</h1>
-        <p class="lead">Zixle Studios builds Roblox experiences, game access flows, merch marketplace systems, UI, economy tools, and launch-ready prototypes for creators who want ideas to feel playable fast.</p>
-        <div class="actions"><a class="button primary" href="mailto:hello@zixlestudios.com">Build with Zixle</a><a class="button" href="#api">View live tools</a></div>
-      </div>
-      <div class="board" aria-label="Roblox development systems board">
-        <div class="play">PLAY</div>
-        <article class="node one"><h2>Roblox Game Blueprint</h2><p>World access, progression, store loops, and rewards designed before the first sprint.</p><div class="metrics"><div class="metric"><strong>5</strong>systems</div><div class="metric"><strong>Pass</strong>access</div><div class="metric"><strong>Live</strong>API</div></div></article>
-        <article class="node two"><h3>Gameplay Logic</h3><p>Controller states, access checks, inventory hooks, and server-safe routes.</p></article>
-        <article class="node three"><h3>Marketplace Tools</h3><p>Merch drops, item lookup, inventory checks, and economy helpers stay online.</p></article>
-        <article class="node four"><h3>Creator Launch Stack</h3><p>Prototype, access, merch, test, publish.</p></article>
-      </div>
+    <section class="hero">
+      <div><span class="tag">Original Roblox studio</span><h1>We launch our own Roblox worlds for players.</h1><p class="lead">Zixle Studios is not a client agency. We create original Roblox games with memorable characters, bacon-player energy, access passes, live events, merch drops, and systems built for real player communities.</p><div class="actions"><a class="btn primary" href="#games">Explore games</a><a class="btn" href="#shop">View merch drops</a></div><div class="stats" id="players"><div class="stat"><strong>24/7</strong><span>world access</span></div><div class="stat"><strong>Bacon+</strong><span>avatar-friendly style</span></div><div class="stat"><strong>Live</strong><span>events and updates</span></div></div></div>
+      <div class="arena" id="characters"><div class="portal">PLAY</div><div class="avatar a1"><div class="hair"></div><div class="head"><div class="face"></div></div><div class="torso"></div><div class="arm l"></div><div class="arm r"></div><div class="leg l"></div><div class="leg r"></div></div><div class="avatar a2"><div class="hair"></div><div class="head"><div class="face"></div></div><div class="torso"></div><div class="arm l"></div><div class="arm r"></div><div class="leg l"></div><div class="leg r"></div></div><div class="avatar a3"><div class="hair"></div><div class="head"><div class="face"></div></div><div class="torso"></div><div class="arm l"></div><div class="arm r"></div><div class="leg l"></div><div class="leg r"></div></div><div class="label one">Bacon squad spawn<small>starter-friendly, funny, recognizable</small></div><div class="label two">Original characters<small>avatars, outfits, worlds, rewards</small></div><div class="label three">Game access hub<small>passes, gates, events, perks</small></div></div>
     </section>
-    <section class="band" id="services"><div class="section"><div class="section-head"><h2>Development support for Roblox worlds.</h2><p>Focused help across the parts that make an experience feel real: game access, scripting, interfaces, marketplace systems, backend tools, and launch polish.</p></div><div class="services">
-      <article class="service"><span>01</span><h3>Roblox Experiences</h3><p>World structure, gameplay loops, progression, and player-ready scripting.</p></article>
-      <article class="service"><span>02</span><h3>Access Systems</h3><p>Game pass checks, role gates, private areas, rewards, and permissions.</p></article>
-      <article class="service" id="marketplace"><span>03</span><h3>Marketplace & Merch</h3><p>Shop flows, merch drops, item pages, inventory hooks, and purchase logic.</p></article>
-      <article class="service"><span>04</span><h3>Game UI</h3><p>Menus, HUDs, shops, progression screens, and readable in-game flows.</p></article>
-      <article class="service"><span>05</span><h3>Backend Tools</h3><p>Fast APIs, data bridges, admin helpers, and analytics-ready endpoints.</p></article>
-    </div></div></section>
-    <section class="section" id="work"><div class="work"><article class="case"><h3>From rough Roblox idea to playable launch.</h3><p>Zixle Studios can help shape the flow, build the core mechanics, add access systems, connect marketplace merch, and clean up the parts players notice first.</p><div class="step"><strong>Plan</strong><span>core loop, access, and player goals</span></div><div class="step"><strong>Build</strong><span>systems, UI, merch, and API support</span></div><div class="step"><strong>Polish</strong><span>feedback, responsiveness, launch pass</span></div></article><article class="api" id="api"><pre>{
-  "studio": "Zixle Studios",
-  "focus": ["Roblox development", "game access", "marketplace merch"],
-  "status": "/health",
-  "live_endpoints": ["/market/item/search?q=dominus", "/market/item/{item_id}", "/roblox/player/{username}/inventory"]
-}</pre></article></div></section>
+    <section class="band" id="games"><div class="section"><div class="section-head"><h2>Games made by Zixle, launched on Roblox.</h2><p>Our site should feel like a player hub: what we are building, who it is for, how players join, and what drops are coming next.</p></div><div class="games"><article class="game"><span class="pill">Featured experience</span><h3>Zixle City: Bacon Rise</h3><p>A fast-moving Roblox world concept built around social play, progression, avatar identity, world access, limited-time areas, and community events.</p><div class="world"><div class="cube"></div></div></article><div class="tiles"><article class="tile"><span class="pill">Player usage</span><h3>Built for return visits</h3><p>Daily rewards, shops, unlockable zones, and event timers make the site feel tied to active games, not a portfolio.</p></article><article class="tile"><span class="pill">Access</span><h3>Game passes and perks</h3><p>VIP doors, early access portals, cosmetics, private hangouts, and reward multipliers are part of the world design.</p></article></div></div></div></section>
+    <section class="section"><div class="section-head"><h2>What players should expect.</h2><p>Zixle Studios is about original Roblox experiences with strong identity and reasons to keep playing.</p></div><div class="features"><article class="feature"><span>01</span><h3>Original Games</h3><p>Roblox worlds made by Zixle Studios, not websites for other people.</p></article><article class="feature"><span>02</span><h3>Bacon Characters</h3><p>Blocky bacon-haired avatars, squads, enemies, NPCs, and player-friendly style.</p></article><article class="feature"><span>03</span><h3>Player Access</h3><p>Passes, locked zones, perks, rewards, and progression built into the experience.</p></article><article class="feature"><span>04</span><h3>Live Updates</h3><p>Events, seasonal drops, game patches, and community moments.</p></article></div></section>
+    <section class="band" id="shop"><div class="section"><div class="section-head"><h2>Marketplace and merch drops.</h2><p>The brand should feel connected to Roblox-style items: outfits, cosmetics, game passes, launch bundles, and event rewards.</p></div><div class="shop"><article class="item"><div class="item-art">ZX</div><h3>Zixle Hoodie Drop</h3><p>Creator-style merch for players who want to rep the studio inside the community.</p></article><article class="item"><div class="item-art">VIP</div><h3>World Access Pass</h3><p>Premium portals, private hangouts, and early access areas for active players.</p></article><article class="item"><div class="item-art">B</div><h3>Bacon Starter Pack</h3><p>Fun starter identity with bacon-player inspired cosmetics and launch rewards.</p></article></div></div></section>
   </main>
-  <footer><strong>Zixle Studios</strong><span>Roblox game development, tools, access systems, and marketplace polish.</span></footer>
+  <footer><strong>Zixle Studios</strong><span>Original Roblox games, characters, player access, and merch drops.</span></footer>
 </body>
 </html>
 """
-
 
 @app.get("/", response_class=HTMLResponse)
 def home():
     return HTMLResponse(HOME_HTML)
 
-
 @app.get("/health")
 def health():
-    return {"ok": True, "studio": "Zixle Studios"}
-
-
-@app.get("/api")
-def api_info():
-    return {
-        "studio": "Zixle Studios",
-        "focus": ["Roblox development", "game access", "marketplace merch", "game UI"],
-        "status": "online",
-    }
+    return {"ok": True, "studio": "Zixle Studios", "type": "original Roblox games"}
