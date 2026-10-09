@@ -22,7 +22,7 @@ HOME_HTML = r"""
 <meta name="description" content="Zixle Studios makes original Roblox games: Snowball Chase, U Got Smoked, Fireball Arena and Bacon City. Fly through our worlds.">
 <meta name="theme-color" content="#5cc8ff">
 <meta property="og:title" content="Zixle Studios | Roblox Games">
-<meta property="og:description" content="Original Roblox worlds with bacon characters, game passes, merch drops and loud updates.">
+<meta property="og:description" content="Original Roblox worlds with chaotic characters, game passes, merch drops and loud updates.">
 <meta property="og:url" content="https://www.zixlestudios.com/">
 <meta property="og:type" content="website">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='4' y='4' width='56' height='56' fill='%23ffd23a' stroke='%23142046' stroke-width='6'/%3E%3Cpath d='M18 18h28v8L28 40h18v8H18v-8l18-14H18z' fill='%23142046'/%3E%3C/svg%3E">
@@ -260,7 +260,7 @@ footer{padding-block:40px 30px}
     <div class="hero-copy">
       <div>
         <h1>We make Zixle games.</h1>
-        <p class="lead">Original Roblox worlds with <strong>bacon characters</strong>, wild thumbnails, game passes, merch drops and updates that give you a reason to come back.</p>
+        <p class="lead">Original Roblox worlds with <strong>chaotic characters</strong>, wild thumbnails, game passes, merch drops and updates that give you a reason to come back.</p>
         <div class="row">
           <a class="btn" href="#games">View Games</a>
           <a class="btn white" href="#about">About Us</a>
@@ -351,10 +351,10 @@ footer{padding-block:40px 30px}
       <div class="inv">
         <div class="slot" style="--c:var(--sun)"><canvas width="16" height="16" data-icon="door"></canvas><div><h3>VIP doors</h3><p>Private rooms and spawns only pass holders can walk through.</p><small>Game pass</small></div></div>
         <div class="slot" style="--c:var(--ice)"><canvas width="16" height="16" data-icon="bolt"></canvas><div><h3>Early access areas</h3><p>Play new maps and modes before everyone else.</p><small>Game pass</small></div></div>
-        <div class="slot" style="--c:var(--smoke)"><canvas width="16" height="16" data-icon="gem"></canvas><div><h3>Cosmetic packs</h3><p>Trails, effects and fits that make your bacon stand out.</p><small>Bundle</small></div></div>
+        <div class="slot" style="--c:var(--smoke)"><canvas width="16" height="16" data-icon="gem"></canvas><div><h3>Cosmetic packs</h3><p>Trails, effects and fits that make your avatar stand out.</p><small>Bundle</small></div></div>
         <div class="slot" style="--c:var(--grass)"><canvas width="16" height="16" data-icon="shirt"></canvas><div><h3>Creator merch</h3><p>Zixle avatar clothing and accessories from the studio.</p><small>Merch</small></div></div>
         <div class="slot" style="--c:var(--fire)"><canvas width="16" height="16" data-icon="clock"></canvas><div><h3>Limited event rewards</h3><p>Show up during live events for drops that never come back.</p><small>Limited</small></div></div>
-        <div class="slot" style="--c:var(--pink)"><canvas width="16" height="16" data-icon="gift"></canvas><div><h3>Bacon starter bundles</h3><p>Everything a fresh bacon needs on day one.</p><small>Starter</small></div></div>
+        <div class="slot" style="--c:var(--pink)"><canvas width="16" height="16" data-icon="gift"></canvas><div><h3>Starter bundles</h3><p>Everything a new player needs on day one.</p><small>Starter</small></div></div>
       </div>
     </div>
   </section>
@@ -364,7 +364,7 @@ footer{padding-block:40px 30px}
       <h2 class="big-type">Got a world idea?</h2>
       <p>Tell us about game modes, merch, access passes or community features you want next. The best ideas end up in the game.</p>
       <form id="ideaForm">
-        <label class="f" for="fName">Name or Roblox username<input id="fName" name="name" required placeholder="BaconLegend_99" autocomplete="nickname"></label>
+        <label class="f" for="fName">Name or Roblox username<input id="fName" name="name" required placeholder="SnowballLegend_99" autocomplete="nickname"></label>
         <div class="chips" role="radiogroup" aria-label="Topic">
           <input type="radio" name="topic" id="tp1" value="Game mode" checked><label for="tp1">Game mode</label>
           <input type="radio" name="topic" id="tp2" value="Merch"><label for="tp2">Merch</label>
@@ -381,7 +381,7 @@ footer{padding-block:40px 30px}
     <div class="foot">
       <span class="big-type">ZIXLE</span>
       <nav aria-label="Footer"><a href="#about">About Us</a><a href="#games">Games</a><a href="#shop">Marketplace</a><a href="#contact">Contact</a><a href="https://www.roblox.com/communities/908132892" target="_blank" rel="noopener">Roblox community</a></nav>
-      <small>© <span id="yr">2026</span> Zixle Studios. Original Roblox games, player access, bacon characters and marketplace drops. Not affiliated with Roblox Corporation.</small>
+      <small>© <span id="yr">2026</span> Zixle Studios. Original Roblox games, player access, chaotic characters and marketplace drops. Not affiliated with Roblox Corporation.</small>
     </div>
   </footer>
 </main>
