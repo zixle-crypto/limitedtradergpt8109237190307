@@ -19,7 +19,7 @@ HOME_HTML = r"""
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Zixle Studios</title>
-<meta name="description" content="Zixle Studios makes original Roblox games: Snowball Chase, U Got Smoked, Fireball Arena and Bacon City. Fly through our worlds.">
+<meta name="description" content="Zixle Studios makes original Roblox games, including Snowball Fight! and DON’T LET BRAINROT ESCAPE!!. Fly through our worlds.">
 <meta name="theme-color" content="#5cc8ff">
 <meta property="og:title" content="Zixle Studios | Roblox Games">
 <meta property="og:description" content="Original Roblox worlds with chaotic characters, game passes, merch drops and loud updates.">
@@ -250,7 +250,7 @@ footer{padding-block:40px 30px}
   <a href="#about" data-i="1"><span>About</span></a>
   <a href="#games" data-i="2"><span>Snowball Fight!</span></a>
   <a href="#brainrot" data-i="3"><span>Don’t Let Brainrot Escape</span></a>
-  <a href="#lab" data-i="4"><span>In the lab</span></a>
+  <a href="#lab" data-i="4"><span>Fireball Arena</span></a>
   <a href="#shop" data-i="5"><span>Marketplace</span></a>
   <a href="#contact" data-i="6"><span>Contact</span></a>
 </nav>
@@ -326,17 +326,14 @@ footer{padding-block:40px 30px}
   </section>
 
   <section class="stop wrap" id="lab" data-stop="4">
-    <div class="panel rise lab">
-      <span class="game-tag" style="--c:var(--smoke)">In the lab</span>
-      <h2 class="big-type">Next up from Zixle.</h2>
-      <p>Ideas we're building toward. Tell us which one you want first.</p>
-      <ul class="lab-list">
-        <li style="--c:var(--smoke)"><b>U Got Smoked</b><span>Quick-round battles built for loud wins and thumbnail moments.</span></li>
-        <li style="--c:var(--fire)"><b>Fireball Arena</b><span>Ice versus fire powers in arenas that feel like they're falling apart.</span></li>
-        <li style="--c:var(--pink)"><b>Bacon City</b><span>A social world for cosmetics, hangouts, codes, shops and events.</span></li>
-      </ul>
-      <div class="row" style="margin-top:18px"><a class="btn white" href="#contact">Vote with an idea</a></div>
-    </div>
+    <article class="panel rise game" style="--c:var(--fire)">
+      <span class="status" style="--c:var(--sun)">Concept</span>
+      <span class="game-tag">Next up</span>
+      <h2 class="big-type">Fireball Arena</h2>
+      <p>Ice versus fire. Pick a side, charge your powers and wreck arenas that feel like they're falling apart around you.</p>
+      <ul><li>Ice vs fire</li><li>Powers</li><li>High-impact rounds</li></ul>
+      <div class="row" style="margin-top:20px"><a class="btn white" href="#contact">Share an idea for it</a></div>
+    </article>
   </section>
 
   <section class="stop wrap" id="shop" data-stop="5">
@@ -371,7 +368,7 @@ footer{padding-block:40px 30px}
           <input type="radio" name="topic" id="tp3" value="Access passes"><label for="tp3">Access passes</label>
           <input type="radio" name="topic" id="tp4" value="Community"><label for="tp4">Community</label>
         </div>
-        <label class="f" for="fMsg">Your idea<textarea id="fMsg" name="msg" required placeholder="Lava floor round in Snowball Chase"></textarea></label>
+        <label class="f" for="fMsg">Your idea<textarea id="fMsg" name="msg" required placeholder="Lava floor round in Snowball Fight!"></textarea></label>
         <div class="row" style="align-items:center"><button class="btn pink" type="submit">Send idea</button><span class="note" id="note" role="status"></span></div>
       </form>
     </div>
@@ -717,9 +714,7 @@ const ISL = {
   snow:   new THREE.Vector3(84, -2, -14),
   brain:  new THREE.Vector3(166, 2, 8),
   fire:   new THREE.Vector3(250, -1, -10),
-  smoke:  new THREE.Vector3(296, 6, -46),
-  bacon:  new THREE.Vector3(336, 1, -4),
-  shop:   new THREE.Vector3(402, 3, -8),
+  shop:   new THREE.Vector3(330, 3, -8),
 };
 const anim = []; // per-frame updaters
 const arc = (a, b, u, h, out) => out.lerpVectors(a, b, u).setY(out.y + Math.sin(Math.PI * u) * h);
@@ -811,23 +806,6 @@ function buildWorld(){
     [[4, 3], [7, -3], [-1, 7], [10, 3], [2, -6]].forEach(([x, z], k) => { const m = outlined(coinGeo, coinMat, .14); S.add(m); anim.push(t => { m.position.set(c.x + x, top + 1.2 + Math.sin(t * 2 + k) * .3, c.z + z); m.rotation.set(Math.PI / 2, 0, t * 2.5 + k); }); });
   }
 
-  /* --- U Got Smoked: night-stone arena, pillars, rising smoke --- */
-  { const v = new Vox(), c = ISL.smoke;
-    const top = island(v, c.x, c.y, c.z, 8.4, '#5b3fa8', '#3a2a6e', '#2a2350', {seed:3, topColor:(i, j) => ((i + j) & 1 ? '#6a4bc0' : '#ff4f9a')});
-    for (let k = 0; k < 8; k++){ const a = k / 8 * Math.PI * 2, x = c.x + Math.cos(a) * 13, z = c.z + Math.sin(a) * 13;
-      v.box(x, top + 2.5, z, 1.8, 5, 1.8, '#30285c'); v.box(x, top + 5.4, z, 2.4, .8, 2.4, '#ff4f9a', {glow:.4}); }
-    v.box(c.x, top + .5, c.z, 6, 1, 6, '#ffd23a'); v.box(c.x, top + 1.2, c.z, 4, .4, 4, '#ff6a1a');
-    S.add(v.build());
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(15.5, .35, 6, 48), new THREE.MeshBasicMaterial({color:0xff4f9a}));
-    ring.rotation.x = Math.PI / 2; ring.position.set(c.x, top + 6.6, c.z); S.add(ring);
-    const smokeMat = new THREE.MeshStandardMaterial({color:0xcbb8ff, roughness:1, transparent:true, opacity:.85, flatShading:true});
-    const pg = new THREE.IcosahedronGeometry(1, 0);
-    for (let k = 0; k < 16; k++){ const m = new THREE.Mesh(pg, smokeMat.clone()); S.add(m);
-      const a0 = Math.random() * 6.28, r0 = 1 + Math.random() * 3, sp = .5 + Math.random() * .5, ph = Math.random();
-      anim.push(t => { const u = (t * .18 * sp + ph) % 1; m.position.set(c.x + Math.cos(a0 + u * 2) * r0 * (1 + u), top + 1.5 + u * 14, c.z + Math.sin(a0 + u * 2) * r0 * (1 + u)); m.scale.setScalar(.6 + u * 2.6); m.material.opacity = .9 * (1 - u); m.rotation.set(u * 3, u * 2, 0); }); }
-    anim.push(t => { ring.rotation.z = t * .4; ring.position.y = top + 6.6 + Math.sin(t * 1.5) * .3; });
-  }
-
   /* --- Fireball Arena: half ice, half lava, two duelling orbs --- */
   { const v = new Vox(), c = ISL.fire;
     const top = island(v, c.x, c.y, c.z, 9, '#fff', '#5a3a2a', '#3a2a28', {seed:4, topColor:(i, j, x) => { if (i < 0) return (i + j) % 3 === 0 ? '#9fe6ff' : '#d8f6ff'; return (i * 3 + j * 5) % 7 === 0 ? '#ffb020' : ((i + j) % 4 === 0 ? '#ff5a12' : '#3b2220'); }});
@@ -841,25 +819,6 @@ function buildWorld(){
     fireOrb.add(fl); iceOrb.add(il); S.add(fireOrb, iceOrb);
     anim.push(t => { const a = t * .9; fireOrb.position.set(c.x + Math.cos(a) * 6, top + 6 + Math.sin(t * 2) * 1.2, c.z + Math.sin(a) * 6); iceOrb.position.set(c.x - Math.cos(a) * 6, top + 6 - Math.sin(t * 2) * 1.2, c.z - Math.sin(a) * 6); fireOrb.rotation.y = iceOrb.rotation.x = t * 1.4; const s = 1 + Math.sin(t * 9) * .05; fireOrb.scale.setScalar(s); });
     Z.emberFx = particles(new THREE.Vector3(c.x + 8, c.y, c.z), 16, 20, 500, 0xff8a1a, .38, 2.8);
-  }
-
-  /* --- Bacon City: blocky skyline, glowing windows, a giant floating bacon strip --- */
-  { const v = new Vox(), c = ISL.bacon;
-    const top = island(v, c.x, c.y, c.z, 9.4, '#7b84a8', '#a8693a', '#7d8aa6', {seed:5, topColor:(i, j) => (i % 4 === 0 || j % 4 === 0 ? '#ffd9ec' : '#6f7899')});
-    const pal = ['#ff7ab6', '#8a6bff', '#39c6ff', '#ffd23a', '#ff9a5a', '#5fd38a'];
-    let n = 0;
-    for (let i = -3; i <= 3; i++) for (let j = -3; j <= 3; j++){
-      if ((i % 2 === 0) || (j % 2 === 0) || Math.hypot(i, j) > 3.6) continue;
-      const h = 5 + ((i * 13 + j * 7 + 20) % 9) * 1.4, x = c.x + i * 4, z = c.z + j * 4, color = pal[n++ % pal.length];
-      v.box(x, top + h / 2, z, 3.2, h, 3.2, color);
-      for (let y = 1.6; y < h - .8; y += 1.6){ v.box(x - .7, top + y, z + 1.62, .7, .7, .06, '#fff3b0', {glow:.4, line:false}); v.box(x + .7, top + y, z + 1.62, .7, .7, .06, (y * 7 | 0) % 3 ? '#fff3b0' : '#4a3f7a', {glow:.4, line:false}); }
-      v.box(x, top + h + .25, z, 3.4, .5, 3.4, '#142046', {line:false});
-    }
-    S.add(v.build());
-    const bacon = new THREE.Group(); const bv = new Vox();
-    for (let k = 0; k < 12; k++){ const y = Math.sin(k * .9) * 1.1; bv.box(k * 1.2 - 7, y, 0, 1.25, 1, .5, '#d9473a'); bv.box(k * 1.2 - 7, y + .95, 0, 1.25, .9, .5, '#ffc4a8'); bv.box(k * 1.2 - 7, y + 1.85, 0, 1.25, .9, .5, '#c7392e'); }
-    bacon.add(bv.build(.18)); bacon.position.set(c.x, top + 24, c.z - 2); S.add(bacon);
-    anim.push(t => { bacon.rotation.y = Math.sin(t * .6) * .5; bacon.position.y = top + 24 + Math.sin(t * 1.2) * 1.2; });
   }
 
   /* --- Marketplace: golden VIP door, crates, gem, coins --- */
@@ -910,7 +869,7 @@ const STOPS = [
   {p:() => ISL.hq.clone().add(new THREE.Vector3(-7, 4.5, 4)),     yaw:-.55, dist:26,  h:5,  side:-1},
   {p:() => ISL.snow.clone().add(new THREE.Vector3(0, 5, -3)),     yaw:.32,  dist:48,  h:10, side:1},
   {p:() => ISL.brain.clone().add(new THREE.Vector3(0, 5, -2)),    yaw:-.3,  dist:48,  h:12, side:-1},
-  {p:() => new THREE.Vector3(292, 4, -22),                        yaw:.05,  dist:150, h:34, side:1},
+  {p:() => ISL.fire.clone().add(new THREE.Vector3(0, 4, 0)),     yaw:.28,  dist:42,  h:9,  side:1},
   {p:() => ISL.shop.clone().add(new THREE.Vector3(0, 7, 0)),      yaw:.12,  dist:48,  h:9,  side:.7},
   {p:() => ISL.hq.clone().add(new THREE.Vector3(0, 9, 0)),        yaw:-.62, dist:54,  h:20, side:1},
 ];
